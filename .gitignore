@@ -1,0 +1,46 @@
+# Ignore document files
+*.pdf
+
+# Ignore the docs directory with thousands of PDFs
+docs/
+
+# Keep documents-info.xlsx (needed for ground truth) but ignore other Excel files
+*.xlsx
+!documents-info.xlsx
+
+# Ignore log files but keep requirements.txt
+*.txt
+!requirements.txt
+
+# Ignore generated outputs
+user_corrections.xlsx
+user_decisions.json
+failed_downloads.txt
+deviations_*.xlsx
+
+# Ignore Python virtual environments
+venv/
+env/
+ENV/
+.venv/
+virtualenv/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Ignore API keys and sensitive config
+.env
+api_keys.txt
+config.ini
