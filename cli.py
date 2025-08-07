@@ -487,6 +487,10 @@ class BatchProgress:
     pending: List[str]
     start_time: str
     last_checkpoint: str
+    # Export file paths for resume continuity
+    export_results_path: Optional[str] = None
+    export_deviations_path: Optional[str] = None
+    export_ground_truth_path: Optional[str] = None
     
     def save_to_file(self, filepath: str):
         """Save progress to JSON file."""
@@ -497,7 +501,11 @@ class BatchProgress:
             'pending': self.pending,
             'start_time': self.start_time,
             'last_checkpoint': self.last_checkpoint,
-            'completion_rate': len(self.completed) / self.total_files if self.total_files > 0 else 0.0
+            'completion_rate': len(self.completed) / self.total_files if self.total_files > 0 else 0.0,
+            # Export paths for resume continuity
+            'export_results_path': self.export_results_path,
+            'export_deviations_path': self.export_deviations_path,
+            'export_ground_truth_path': self.export_ground_truth_path
         }
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
@@ -516,7 +524,11 @@ class BatchProgress:
                 failed=data['failed'],
                 pending=data['pending'],
                 start_time=data['start_time'],
-                last_checkpoint=data['last_checkpoint']
+                last_checkpoint=data['last_checkpoint'],
+                # Load export paths (with backwards compatibility)
+                export_results_path=data.get('export_results_path'),
+                export_deviations_path=data.get('export_deviations_path'),
+                export_ground_truth_path=data.get('export_ground_truth_path')
             )
         except Exception as e:
             print(f"Warning: Could not load progress file {filepath}: {e}")
@@ -582,8 +594,13 @@ class BatchResults:
                 stats['avg_accuracy'] /= stats['successful']
             return stats
     
-    def export_results(self, output_path: str):
-        """Export all results to Excel file."""
+    def export_results(self, output_path: str, append_mode: bool = False):
+        """Export all results to Excel file.
+        
+        Args:
+            output_path: Path to Excel file
+            append_mode: If True, append to existing file instead of overwriting
+        """
         with self._lock:
             if not self.results:
                 print("No results to export")
@@ -642,9 +659,31 @@ class BatchResults:
                 
                 export_data.append(row)
             
-            df = pd.DataFrame(export_data)
-            df.to_excel(output_path, index=False)
-            print(f"Batch results exported to: {output_path}")
+            # Create DataFrame with new data
+            new_df = pd.DataFrame(export_data)
+            
+            if append_mode and os.path.exists(output_path):
+                # Append mode - load existing data and combine
+                try:
+                    existing_df = pd.read_excel(output_path)
+                    # Combine DataFrames, avoiding duplicates based on filename + timestamp
+                    combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    # Remove duplicates based on filename and timestamp
+                    combined_df = combined_df.drop_duplicates(subset=['filename', 'timestamp'], keep='last')
+                    combined_df.to_excel(output_path, index=False)
+                    print(f"Batch results appended to existing file: {output_path}")
+                    print(f"   • Previous entries: {len(existing_df)}")
+                    print(f"   • New entries: {len(new_df)}")  
+                    print(f"   • Total entries: {len(combined_df)}")
+                except Exception as e:
+                    print(f"Warning: Could not append to existing file, overwriting: {e}")
+                    new_df.to_excel(output_path, index=False)
+                    print(f"Batch results exported to: {output_path}")
+            else:
+                # Normal mode - overwrite file
+                new_df.to_excel(output_path, index=False)
+                print(f"Batch results exported to: {output_path}")
+            
             return output_path
     
     def export_updated_ground_truth(self, output_path: str, ground_truth_path: str = "documents-info.xlsx"):
@@ -1858,6 +1897,17 @@ def batch_process_pdfs(excel_path: str, docs_dir: str, api_key: str,
             print(f"❌ No progress file found at {progress_file}. Cannot retry failed files.")
             return BatchResults()
         
+        # Backup existing progress file before creating new one
+        if os.path.exists(progress_file):
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = progress_file.replace('.json', f'_backup_{timestamp}.json')
+            try:
+                import shutil
+                shutil.copy2(progress_file, backup_file)
+                print(f"💾 Existing progress backed up to: {backup_file}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not backup existing progress file: {e}")
+        
         # Create new progress tracker
         progress = BatchProgress(
             total_files=len(pdf_files),
@@ -2060,7 +2110,8 @@ def main():
     parser.add_argument('--auto-extracted', action='store_true', help='Automatically use extracted values for all discrepancies')
     
     # Search grounding options
-    parser.add_argument('--auto-resolve', action='store_true', help='Enable automatic search resolution of conflicts')
+    parser.add_argument('--auto-resolve', action='store_true', default=True, help='Enable automatic search resolution of conflicts (default: True)')
+    parser.add_argument('--no-auto-resolve', action='store_false', dest='auto_resolve', help='Disable automatic search resolution of conflicts')
     parser.add_argument('--with-search', action='store_true', help='Use search grounding with interactive mode')
     parser.add_argument('--search-threshold', type=float, default=0.8, help='Minimum confidence for auto-resolution (default: 0.8)')
     
@@ -2193,38 +2244,85 @@ def main():
                 max_retries=getattr(args, 'max_retries', 3)  # Use getattr for backwards compatibility
             )
             
-            # Auto-save results when using --auto-resolve to prevent data loss
-            if enable_search and args.auto_resolve and batch_results and not args.batch_results:
-                # Generate automatic filename with timestamp
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                auto_save_path = f"batch_results_autosave_{timestamp}.xlsx"
+            # ALWAYS export all batch results automatically (unless explicitly disabled)
+            if batch_results:
+                # Determine export paths - use saved paths from progress if resuming, otherwise generate new ones
+                if args.resume and hasattr(batch_results, 'progress') and batch_results.progress:
+                    # Check if progress has saved export paths from previous run
+                    progress_obj = batch_results.progress if hasattr(batch_results, 'progress') else None
+                else:
+                    progress_obj = None
+                
+                # Try to get progress object from somewhere (we need to pass it to get saved paths)
+                # For now, we'll determine if this is a resume by checking if saved export paths exist
+                if args.resume and 'progress' in locals() and hasattr(progress, 'export_results_path') and progress.export_results_path:
+                    # Resume mode - use saved export paths
+                    results_path = args.batch_results if args.batch_results else progress.export_results_path
+                    deviations_path = args.batch_deviations if args.batch_deviations else progress.export_deviations_path
+                    ground_truth_path = args.batch_ground_truth if args.batch_ground_truth else progress.export_ground_truth_path
+                    print(f"🔄 RESUMING: Using existing export files from previous run")
+                else:
+                    # New run - generate new filenames with timestamp
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    results_path = args.batch_results if args.batch_results else f"batch_results_{timestamp}.xlsx"
+                    deviations_path = args.batch_deviations if args.batch_deviations else f"batch_deviations_{timestamp}.xlsx"
+                    ground_truth_path = args.batch_ground_truth if args.batch_ground_truth else f"batch_ground_truth_{timestamp}.xlsx"
+                    
+                    # Save export paths to progress for future resume
+                    if 'progress' in locals():
+                        progress.export_results_path = results_path
+                        progress.export_deviations_path = deviations_path
+                        progress.export_ground_truth_path = ground_truth_path
+                        progress.save_to_file(args.progress_file)
+                
+                # Determine if we should append (resume mode with existing export paths)
+                is_resuming = args.resume and 'progress' in locals() and hasattr(progress, 'export_results_path') and progress.export_results_path
+                
+                # 1. Export results
                 try:
-                    batch_results.export_results(auto_save_path)
-                    print(f"\n💾 AUTO-SAVED: Results with search resolutions saved to: {auto_save_path}")
-                except Exception as e:
-                    print(f"❌ Error auto-saving batch results: {e}")
-            
-            # Export batch results if explicitly requested
-            if args.batch_results and batch_results:
-                try:
-                    batch_results.export_results(args.batch_results)
+                    batch_results.export_results(results_path, append_mode=is_resuming)
+                    if not is_resuming:
+                        print(f"\n📊 Batch results exported to: {results_path}")
                 except Exception as e:
                     print(f"❌ Error exporting batch results: {e}")
-            
-            if args.batch_deviations and batch_results and batch_results.deviation_log:
+                
+                # 2. Export deviations (always if any exist)
+                if batch_results.deviation_log:
+                    try:
+                        export_path = export_deviations_to_excel(batch_results.deviation_log, deviations_path, append_mode=is_resuming)
+                        if export_path and not is_resuming:
+                            print(f"📊 Batch deviations exported to: {export_path}")
+                            print(f"   • Total deviations tracked: {len(batch_results.deviation_log)}")
+                    except Exception as e:
+                        print(f"❌ Error exporting batch deviations: {e}")
+                else:
+                    print(f"✅ No deviations to export (perfect match with ground truth)")
+                
+                # 3. Export updated ground truth
                 try:
-                    export_path = export_deviations_to_excel(batch_results.deviation_log, args.batch_deviations)
-                    if export_path:
-                        print(f"\n📊 Batch deviations exported to: {export_path}")
-                except Exception as e:
-                    print(f"❌ Error exporting batch deviations: {e}")
-            
-            # Export updated ground truth in original format
-            if args.batch_ground_truth and batch_results:
-                try:
-                    batch_results.export_updated_ground_truth(args.batch_ground_truth)
+                    # Use the same file as both input and output for true search & replace
+                    input_file = ground_truth_path if (is_resuming and os.path.exists(ground_truth_path)) else "documents-info.xlsx"
+                    batch_results.export_updated_ground_truth(ground_truth_path, input_file)
+                    if input_file != "documents-info.xlsx":
+                        print(f"📊 Updated ground truth (search & replace): {ground_truth_path}")
+                        print(f"   • Input: {input_file} → Output: {ground_truth_path}")
+                    else:
+                        print(f"📊 Updated ground truth exported to: {ground_truth_path}")
                 except Exception as e:
                     print(f"❌ Error exporting updated ground truth: {e}")
+                
+                # Print summary of all exports
+                print(f"\n{'='*50}")
+                print(f"📁 ALL BATCH EXPORTS COMPLETED:")
+                print(f"   • Results: {results_path}")
+                if batch_results.deviation_log:
+                    print(f"   • Deviations: {deviations_path}")
+                print(f"   • Ground Truth: {ground_truth_path}")
+                if not args.resume or not ('progress' in locals() and progress.export_results_path):
+                    print(f"   • Timestamp: {timestamp}")
+                else:
+                    print(f"   • Mode: Resume (appending to existing files)")
+                print(f"{'='*50}")
             
             return 0
         

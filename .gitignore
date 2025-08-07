@@ -1,8 +1,12 @@
 # Ignore document files
 *.pdf
+*.docx
+*.log
+*.json
 
 # Ignore the docs directory with thousands of PDFs
 docs/
+docs_correct/
 
 # Keep documents-info.xlsx (needed for ground truth) but ignore other Excel files
 *.xlsx

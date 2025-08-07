@@ -144,7 +144,7 @@ def adjust_confidence_with_ground_truth(metadata: DocumentMetadata,
             field.evidence += f" [Differs from reference: '{ref_value}']"
             
             # Add reference value as alternative if not already present
-            if hasattr(field, 'alternatives'):
+            if hasattr(field, 'alternatives') and field.alternatives is not None:
                 if str(ref_value) not in field.alternatives:
                     field.alternatives.append(str(ref_value))
     
@@ -257,29 +257,70 @@ def generate_deviation_report(deviation_log: list) -> str:
     
     return "\n".join(report)
 
-def export_deviations_to_excel(deviation_log: list, output_path: str = "all_deviations.xlsx"):
-    """Export all deviations to Excel for manual review and Excel data correction."""
+def export_deviations_to_excel(deviation_log: list, output_path: str = "all_deviations.xlsx", append_mode: bool = False):
+    """Export all deviations to Excel for manual review and Excel data correction.
+    
+    Args:
+        deviation_log: List of deviation entries
+        output_path: Excel file path
+        append_mode: If True, append to existing file instead of overwriting
+    """
     
     rows = []
     for entry in deviation_log:
-        for dev in entry["all_deviations"]:
-            rows.append({
-                "document": entry["document"],
-                "filename_key": entry.get("filename_key"),
-                "field": dev["field"],
-                "extracted_value": dev["extracted_value"],
-                "reference_value": dev["reference_value"],
-                "extraction_confidence": dev["extraction_confidence"],
-                "evidence": dev["evidence"],
-                "source_page": dev["source_page"],
-                "alternatives": ", ".join(dev["alternatives"]) if dev["alternatives"] else "",
-                "timestamp": entry["timestamp"]
-            })
+        if not isinstance(entry, dict):
+            continue
+            
+        # Handle different deviation entry structures
+        all_deviations = entry.get("all_deviations", [])
+        if not all_deviations:
+            continue
+            
+        for dev in all_deviations:
+            try:
+                rows.append({
+                    "document": entry.get("document", "unknown"),
+                    "filename_key": entry.get("filename_key", ""),
+                    "field": dev.get("field", ""),
+                    "extracted_value": dev.get("extracted_value", ""),
+                    "reference_value": dev.get("reference_value", ""),
+                    "extraction_confidence": dev.get("extraction_confidence", 0.0),
+                    "evidence": dev.get("evidence", ""),
+                    "source_page": dev.get("source_page", ""),
+                    "alternatives": ", ".join(dev.get("alternatives", [])) if dev.get("alternatives") else "",
+                    "timestamp": entry.get("timestamp", "")
+                })
+            except Exception as e:
+                print(f"Warning: Skipping malformed deviation entry: {e}")
     
     if rows:
-        df = pd.DataFrame(rows)
-        df.to_excel(output_path, index=False)
-        print(f"All deviations exported to: {output_path}")
+        # Create DataFrame with new data
+        new_df = pd.DataFrame(rows)
+        
+        if append_mode and os.path.exists(output_path):
+            # Append mode - load existing data and combine
+            try:
+                existing_df = pd.read_excel(output_path)
+                # Combine DataFrames, avoiding duplicates based on document + field + timestamp
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                # Remove duplicates based on document, field, and timestamp
+                combined_df = combined_df.drop_duplicates(
+                    subset=['document', 'field', 'timestamp'], keep='last'
+                )
+                combined_df.to_excel(output_path, index=False)
+                print(f"Deviations appended to existing file: {output_path}")
+                print(f"   • Previous entries: {len(existing_df)}")
+                print(f"   • New entries: {len(new_df)}")
+                print(f"   • Total entries: {len(combined_df)}")
+            except Exception as e:
+                print(f"Warning: Could not append to existing deviations file, overwriting: {e}")
+                new_df.to_excel(output_path, index=False)
+                print(f"All deviations exported to: {output_path}")
+        else:
+            # Normal mode - overwrite file
+            new_df.to_excel(output_path, index=False)
+            print(f"All deviations exported to: {output_path}")
+        
         return output_path
     else:
         print("No deviations to export")

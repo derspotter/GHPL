@@ -52,5 +52,5 @@ def examine_excel_structure(excel_path: str):
         print(f"Error reading Excel file: {e}")
 
 # Examine the documents-info.xlsx file
-excel_path = "/home/justus/Nextcloud/GHPL/documents-info.xlsx"
+excel_path = "documents-info.xlsx"
 examine_excel_structure(excel_path)

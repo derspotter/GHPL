@@ -6,7 +6,15 @@ import tempfile
 import pydantic
 from enum import Enum
 import subprocess
+import time
+import threading
+import logging
+import traceback
 from typing import Optional, Union, List
+from dataclasses import dataclass
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # --- Pydantic Models for Structured Output ---
 
@@ -132,7 +140,7 @@ def repair_pdf_with_qpdf(damaged_path, repaired_path):
             print(f"qpdf stderr: {e.stderr}")
         return False
 
-def prepare_and_upload_pdf_subset(client, pdf_path, first_pages=3, last_pages=2):
+def prepare_and_upload_pdf_subset(client, pdf_path, first_pages=3, last_pages=2, max_retries=3):
     """
     Uses pikepdf to select the first few and last few pages of a PDF, saves them to
     temporary files, and uploads them using the provided client.
@@ -223,16 +231,50 @@ def prepare_and_upload_pdf_subset(client, pdf_path, first_pages=3, last_pages=2)
 
         print(f"Temporary PDF subsets created")
 
-        # 3. Upload both files using the client
+        # 3. Upload both files using the client with retry logic
         print("Uploading PDF subsets to Gemini...")
         display_name = os.path.basename(pdf_path)
         
-        uploaded_first = client.files.upload(file=temp_first_path)
-        print(f"Successfully uploaded first pages: {uploaded_first.name}")
+        # Upload first pages with retry
+        for retry in range(max_retries + 1):
+            try:
+                if retry > 0:
+                    backoff_time = (2 ** retry) * 2
+                    logger.info(f"Retrying upload of first pages (attempt {retry + 1}/{max_retries + 1}) after {backoff_time}s")
+                    print(f"Retrying upload after {backoff_time}s...")
+                    time.sleep(backoff_time)
+                
+                uploaded_first = client.files.upload(file=temp_first_path)
+                print(f"Successfully uploaded first pages: {uploaded_first.name}")
+                break
+            except Exception as e:
+                logger.error(f"Upload failed (attempt {retry + 1}/{max_retries + 1}): {e}")
+                if retry >= max_retries:
+                    raise Exception(f"Failed to upload first pages after {max_retries + 1} attempts: {e}")
         
+        # Upload last pages with retry
         if temp_last_path:
-            uploaded_last = client.files.upload(file=temp_last_path)
-            print(f"Successfully uploaded last pages: {uploaded_last.name}")
+            for retry in range(max_retries + 1):
+                try:
+                    if retry > 0:
+                        backoff_time = (2 ** retry) * 2
+                        logger.info(f"Retrying upload of last pages (attempt {retry + 1}/{max_retries + 1}) after {backoff_time}s")
+                        print(f"Retrying upload after {backoff_time}s...")
+                        time.sleep(backoff_time)
+                    
+                    uploaded_last = client.files.upload(file=temp_last_path)
+                    print(f"Successfully uploaded last pages: {uploaded_last.name}")
+                    break
+                except Exception as e:
+                    logger.error(f"Upload failed (attempt {retry + 1}/{max_retries + 1}): {e}")
+                    if retry >= max_retries:
+                        # Clean up first upload if second fails
+                        if uploaded_first:
+                            try:
+                                client.files.delete(name=uploaded_first.name)
+                            except:
+                                pass
+                        raise Exception(f"Failed to upload last pages after {max_retries + 1} attempts: {e}")
 
     except Exception as e:
         print(f"An error occurred during PDF processing or upload: {e}")
@@ -337,7 +379,7 @@ def recommend_action(metadata: DocumentMetadata) -> dict:
         'recommendations': recommendations
     }
 
-def get_metadata_from_gemini(client, first_pages_file, last_pages_file):
+def get_metadata_from_gemini(client, first_pages_file, last_pages_file, rate_limiter=None, max_retries=3):
     """
     Uses the Gemini API with structured output to extract metadata from PDF pages.
 
@@ -345,6 +387,7 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file):
         client (genai.Client): The initialized Google GenAI client.
         first_pages_file (genai.files.File): The uploaded file object for first pages.
         last_pages_file (genai.files.File): The uploaded file object for last pages (can be None).
+        rate_limiter (RateLimiter, optional): Rate limiter for API calls.
 
     Returns:
         DocumentMetadata: A Pydantic object with the extracted metadata, or None.
@@ -353,7 +396,7 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file):
         print("No uploaded file was provided to the Gemini API.")
         return None
 
-    model_name = 'gemini-2.5-pro'
+    model_name = 'gemini-2.5-flash'
     pdf_filename = first_pages_file.display_name
     
     # Build contents list based on available files
@@ -431,35 +474,86 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file):
         """
         contents = [prompt, first_pages_file]
 
+    # Retry logic for Gemini API calls
+    for retry in range(max_retries + 1):
+        try:
+            if retry > 0:
+                backoff_time = (2 ** retry) * 2
+                logger.info(f"Retrying Gemini API call (attempt {retry + 1}/{max_retries + 1}) after {backoff_time}s")
+                print(f"⏳ Retrying API call after {backoff_time}s...")
+                time.sleep(backoff_time)
+            
+            print(f"Sending uploaded PDFs to '{model_name}' for structured metadata extraction (attempt {retry + 1}/{max_retries + 1})...")
+            
+            # Apply rate limiting if provided
+            if rate_limiter:
+                wait_time = rate_limiter.wait_if_needed()
+                if wait_time > 0:
+                    print(f"⏳ Rate limiting: waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+            
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': DocumentMetadata,
+                }
+            )
+            
+            # Parse the JSON response into our Pydantic model
+            metadata = DocumentMetadata.model_validate_json(response.text)
+            
+            # Calculate overall scores
+            metadata.overall_confidence = calculate_overall_confidence(metadata)
+            metadata.metadata_completeness = calculate_metadata_completeness(metadata)
+            
+            if retry > 0:
+                logger.info(f"Successfully extracted metadata after {retry} retries")
+                print(f"✅ Successfully extracted metadata after {retry} retries")
+            
+            # Clean up uploaded files before returning successful result
+            try:
+                print(f"Deleting uploaded files from server...")
+                client.files.delete(name=first_pages_file.name)
+                if last_pages_file:
+                    client.files.delete(name=last_pages_file.name)
+                print("Files deleted.")
+            except Exception as cleanup_error:
+                logger.warning(f"Warning: Error during successful cleanup: {cleanup_error}")
+            
+            return metadata
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Gemini API error (attempt {retry + 1}/{max_retries + 1}): {type(e).__name__}: {error_msg}")
+            logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+            
+            # Check if error is retryable
+            retryable_errors = [
+                'rate limit', 'quota', 'timeout', '503', '429',
+                'connection', 'temporary', 'unavailable'
+            ]
+            
+            should_retry = any(err in error_msg.lower() for err in retryable_errors)
+            
+            if not should_retry or retry >= max_retries:
+                print(f"❌ Failed after {retry + 1} attempts: {type(e).__name__}: {e}")
+                return None
+            
+            print(f"⚠️ Attempt {retry + 1} failed: {e}")
+    
+    # Should never reach here - clean up files and return None
     try:
-        print(f"Sending uploaded PDFs to '{model_name}' for structured metadata extraction...")
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config={
-                'response_mime_type': 'application/json',
-                'response_schema': DocumentMetadata,
-            }
-        )
-        
-        # Parse the JSON response into our Pydantic model
-        metadata = DocumentMetadata.model_validate_json(response.text)
-        
-        # Calculate overall scores
-        metadata.overall_confidence = calculate_overall_confidence(metadata)
-        metadata.metadata_completeness = calculate_metadata_completeness(metadata)
-        
-        return metadata
-        
-    except Exception as e:
-        print(f"An error occurred with the Gemini API or Pydantic parsing: {e}")
-        return None
-    finally:
         print(f"Deleting uploaded files from server...")
         client.files.delete(name=first_pages_file.name)
         if last_pages_file:
             client.files.delete(name=last_pages_file.name)
         print("Files deleted.")
+    except Exception as cleanup_error:
+        logger.error(f"Error during file cleanup: {cleanup_error}")
+    
+    return None
 
 
 if __name__ == "__main__":
@@ -467,7 +561,7 @@ if __name__ == "__main__":
     # IMPORTANT: You need to install pydantic: pip install pydantic
     # IMPORTANT: Set your Gemini API key as an environment variable or replace below
     import os
-    API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
+    API_KEY = os.environ.get("GOOGLE_API_KEY", os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE"))
 
 
     # --- PDF File ---
