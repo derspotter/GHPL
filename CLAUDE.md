@@ -4,128 +4,291 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Global Health Policy Library (GHPL) project focused on PDF document metadata extraction for health policy documents. The codebase includes tools for downloading health policy documents and extracting structured metadata using Google's Gemini AI API.
+Global Health Policy Library (GHPL) - An AI-powered system for extracting and validating structured metadata from health policy PDFs using Google's Gemini API with advanced search grounding capabilities. The system processes thousands of health policy documents, validates against ground truth data, and uses Google Search to resolve metadata conflicts.
 
 ## Key Commands
 
-### Python Environment
+### Environment Setup
 ```bash
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Set API key (required)
+export GOOGLE_API_KEY="your-api-key-here"
+# Or create .env file with: GOOGLE_API_KEY=your-api-key
 ```
 
-### Main Scripts
-- `python cli.py <pdf_path>` - **NEW**: Extract metadata with ground truth validation
-- `python get_metadata.py` - Extract metadata from a single PDF using Gemini API  
-- `python download_docs.py` - Download documents from URLs in Excel file
-- `python examine_excel.py` - Analyze structure of documents-info.xlsx
-- `python test_validation.py` - Test ground truth validation system
+### Main CLI Operations
 
-### CLI Usage Examples
+**Single File Processing:**
 ```bash
-# Basic extraction with validation
-python cli.py docs/sample.pdf
+# Basic extraction with ground truth validation
+python cli.py docs_correct/sample.pdf
 
-# Export deviations to Excel for analysis
-python cli.py docs/sample.pdf --export-deviations deviations.xlsx
+# With search grounding (auto-resolves conflicts)
+python cli.py docs_correct/sample.pdf --auto-resolve
+
+# Interactive resolution mode
+python cli.py docs_correct/sample.pdf --interactive
+
+# Combined interactive with search grounding
+python cli.py docs_correct/sample.pdf --interactive --with-search
+
+# Export deviations analysis
+python cli.py docs_correct/sample.pdf --export-deviations deviations.xlsx
 
 # Show only ground truth statistics
-python cli.py docs/sample.pdf --stats-only
+python cli.py docs_correct/sample.pdf --stats-only
 
-# Use custom Excel file
-python cli.py docs/sample.pdf --excel custom_data.xlsx
+# Custom search confidence threshold
+python cli.py docs_correct/sample.pdf --auto-resolve --search-threshold 0.9
 ```
 
-### Dependencies
-The project uses these key dependencies:
-- `pandas==2.3.1` - Excel and data manipulation
-- `requests==2.32.4` - HTTP requests for downloading
-- `openpyxl==3.1.5` - Excel file handling
-- `google-genai` - Gemini AI API (installed separately)
-- `pikepdf` - PDF processing and repair
-- `pydantic` - Data validation and structured output
+**Batch Processing:**
+```bash
+# Basic batch processing (use docs_correct for best results)
+python cli.py --batch --docs-dir docs_correct --workers 4
+
+# Batch with search grounding and export
+python cli.py --batch --docs-dir docs_correct --workers 4 --limit 100 --with-search \
+  --batch-results results.xlsx --batch-deviations deviations.xlsx
+
+# Resume interrupted batch processing
+python cli.py --batch --resume --workers 4 --with-search
+
+# Retry only failed files from previous batch
+python cli.py --batch --retry-failed --workers 2
+
+# Test batch with small limit and verbose output
+python cli.py --batch --docs-dir docs_correct --limit 10 --verbose --workers 2
+
+# Export updated ground truth after batch processing
+python cli.py --batch --workers 4 --batch-ground-truth updated_ground_truth.xlsx
+```
+
+**Advanced Options:**
+```bash
+# Custom Excel file and progress tracking
+python cli.py --batch --excel custom-data.xlsx --progress-file custom_progress.json
+
+# Rate limiting control for high-volume processing
+python cli.py --batch --workers 8 --max-retries 5
+
+# Export user corrections and decisions
+python cli.py sample.pdf --interactive --export-corrections corrections.xlsx \
+  --log-decisions decisions.json
+```
+
+### Document Management
+```bash
+# Download documents from Excel URLs
+python download_docs.py
+
+# Smart download with resume capability
+python download_docs_smart.py
+
+# Resume interrupted downloads  
+python download_docs_resume.py
+
+# Analyze Excel structure
+python examine_excel.py
+
+# Test single document extraction
+python get_metadata.py
+```
+
+### Testing and Validation
+```bash
+# Test validation system
+python test_validation.py
+
+# Test metadata extraction
+python test_metadata.py
+
+# Check specific document against ground truth
+python check_specific_document.py
+
+# Analyze filename matching for any folder against ground truth
+python check_single_folder.py docs_correct
+python check_single_folder.py docs --excel documents-info.xlsx
+```
 
 ## Architecture
 
 ### Core Components
 
-**PDF Metadata Extraction Pipeline:**
-1. **PDF Processing** (`get_metadata.py:91-208`): Uses pikepdf to extract first/last pages, with qpdf fallback for repair
-2. **Gemini Integration** (`get_metadata.py:375-474`): Structured metadata extraction using Gemini 2.5 Pro
-3. **Confidence Scoring** (`get_metadata.py:49-71`): Each field includes confidence scores and evidence
-4. **Data Models** (`get_metadata.py:13-71`): Pydantic models for structured health policy metadata
+**1. Metadata Extraction Pipeline (`get_metadata.py`)**
+- Uses pikepdf to extract first 3 + last 2 pages for efficiency
+- Sends to Gemini 2.5 Pro with structured output schema (Pydantic)
+- Includes automatic PDF repair via qpdf for corrupted files
+- Returns confidence scores and evidence for each field
 
-**Document Management:**
-- `download_docs.py` - Bulk document downloading from Excel URLs
-- `documents-info.xlsx` - Reference metadata for ground truth validation (2659 documents)
-- `docs/` - Directory containing thousands of health policy PDFs
+**2. Ground Truth Validation (`ground_truth_validation.py`)**
+- Loads reference data from `documents-info.xlsx` (2659 documents)
+- Compares extracted metadata against reference
+- Tracks ALL deviations for quality assessment
+- Adjusts confidence scores based on matches/discrepancies
 
-**Ground Truth Validation System:**
-- `ground_truth_validation.py` - Core validation functions
-- `cli.py` - Command-line interface with integrated validation
-- Compares extracted metadata against Excel reference data
-- Tracks all deviations for quality assessment
-- Adjusts confidence scores based on ground truth matches
-- Exports detailed deviation reports to Excel
+**3. Search Grounding Resolution (`cli.py:resolve_conflicts_with_search`)**
+- Uses Google Search via Gemini to resolve metadata conflicts
+- Single comprehensive search per document (API limit optimization)
+- Auto-resolves conflicts with >0.8 confidence
+- Provides source URLs and reasoning for decisions
 
-### Metadata Schema
+**4. Batch Processing System (`cli.py:batch_process_pdfs`)**
+- ThreadPoolExecutor for concurrent processing
+- Progress tracking with resume capability (`batch_progress.json`)
+- Thread-safe result collection
+- Excel export for results and deviations
 
-The system extracts structured metadata for health policy documents:
-- **Document Type**: Policy, Law, National Health Strategy, etc.
-- **Health Topic**: Cancer, Cardiovascular Health, Non-Communicable Disease
-- **Creator**: Parliament, Ministry, Agency, Foundation, etc.
-- **Governance Level**: National, Regional
-- **Confidence Scoring**: 0.0-1.0 with evidence and alternatives
+**5. Interactive Resolution (`cli.py:handle_discrepancies_interactively`)**
+- User-friendly CLI prompts for conflict resolution
+- Batch handling options for multiple discrepancies
+- Stores corrections separately from original data
+- Builds improved reference dataset
 
-### AI Integration
+### Data Flow
 
-**Gemini API Usage:**
-- Model: `gemini-2.5-pro`
-- Input: First 3 pages + last 2 pages of PDFs
-- Output: Structured JSON following Pydantic schema
-- Features: Confidence scoring, evidence tracking, alternative values
+```
+PDF → Extract Pages → Gemini API → Structured Metadata
+                                          ↓
+                                  Ground Truth Validation
+                                          ↓
+                                  Conflicts Detected?
+                                    ↙           ↘
+                                  No            Yes
+                                  ↓              ↓
+                              Complete    Search Grounding
+                                              ↓
+                                      Auto-resolved?
+                                        ↙         ↘
+                                      Yes         No
+                                       ↓          ↓
+                                   Complete  Interactive
+```
 
-## Development Workflow
+### Key Data Structures
 
-### Working with PDFs
-1. Place test PDFs in `/docs/` directory
-2. Update `PDF_FILE_PATH` in `get_metadata.py` for single document testing
-3. Use pikepdf for PDF manipulation - includes repair functionality for corrupted files
+**DocumentMetadata Schema:**
+- `doc_type`: Policy, Law, National Health Strategy, etc. (enum)
+- `health_topic`: Cancer, Cardiovascular Health, Non-Communicable Disease (enum)
+- `creator`: Parliament, Ministry, Agency, Foundation, etc. (enum)
+- `level`: National, Regional (enum)
+- `title`, `country`, `language`: Free text fields
+- `year`: Integer field
+- Each field includes: value, confidence (0-1), evidence, source_page, alternatives
+
+**BatchProgress:**
+- Tracks: total_files, completed, failed, pending
+- Saves to `batch_progress.json` after each file
+- Enables resume from interruption
+
+**Search Resolution:**
+- Single search per document covering all conflicts
+- Returns: resolved_value, confidence, recommendation, reasoning, sources
+- Auto-resolves if confidence >= 0.8
 
 ### API Configuration
-- Set Gemini API key in `get_metadata.py` (line 480)
-- API key is currently hardcoded - consider environment variable for production
 
-### Testing Approach
-- Use `test_metadata.py` for validation
-- Compare extractions against `documents-info.xlsx` reference data
-- Monitor confidence scores and evidence quality
+**Gemini API:**
+- Model: `gemini-2.5-pro`
+- Environment variable: `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+- Rate limits: Follow Google's limits
+- Search grounding: 1.5k searches/day on tier 1
 
-## File Structure
+**API Key Loading Priority:**
+1. Command line argument `--api-key`
+2. Environment variable `GOOGLE_API_KEY`
+3. Environment variable `GEMINI_API_KEY`
+4. `.env` file
+
+### File Structure
 
 ```
-/home/justus/Nextcloud/GHPL/
-├── docs/                    # Health policy PDFs (4000+ documents)
-├── get_metadata.py          # Main metadata extraction script
-├── download_docs.py         # Document downloader
-├── examine_excel.py         # Excel analysis utility
-├── test_metadata.py         # Testing utilities
-├── documents-info.xlsx      # Reference metadata
-├── plan.md                  # Enhancement roadmap
-├── requirements.txt         # Python dependencies
-└── failed_downloads.txt     # Download error log
+/home/jay/GHPL/
+├── docs/                        # Health policy PDFs (2400+ files)
+├── docs_correct/                # Curated PDFs with verified filenames (2452 files)
+├── cli.py                       # Main CLI with all features
+├── get_metadata.py              # Core extraction logic
+├── ground_truth_validation.py   # Validation functions
+├── download_docs_resume.py     # Smart downloader
+├── check_single_folder.py      # Filename matching analysis tool
+├── documents-info.xlsx         # Ground truth data (2659 docs)
+├── batch_progress.json         # Batch processing state
+├── requirements.txt            # Dependencies
+└── .env                        # API key (create this)
 ```
 
-## Enhancement Plan
+### Critical Implementation Details
 
-The `plan.md` file contains a comprehensive roadmap for improving the metadata extraction system, including:
-- Hybrid approach using built-in PDF metadata
-- Ground truth validation against Excel reference data
-- Flexible schema with self-correction
-- Confidence scoring enhancements
+**Thread Safety:**
+- BatchResults class uses threading.Lock for safe concurrent writes
+- Progress saves use atomic operations
+- Each thread gets independent Gemini client
 
-## Important Notes
+**Error Recovery:**
+- PDF repair with qpdf fallback
+- Search grounding initialization with empty dict (not None)
+- Safe list operations with membership checks
+- Comprehensive exception handling
 
-- This is a research/analysis project focused on health policy document processing
-- All PDF processing includes repair mechanisms for corrupted files
-- The system prioritizes accuracy over speed with detailed confidence tracking
-- Reference data in Excel may contain errors - track all deviations for quality assessment
+**Performance Optimizations:**
+- Only first 3 + last 2 pages sent to Gemini
+- Single search query per document
+- Concurrent processing with configurable workers
+- Ground truth loaded once, shared across threads
+
+**URL Parsing Consistency:**
+- All scripts now use consistent URL-to-filename parsing with proper URL decoding
+- Handles encoded characters: %20 → space, %28 → (, %29 → )
+- Uses `urlparse()` and `unquote()` instead of treating URLs as file paths
+- Ensures filename matching works correctly for files like `Hck1ocv.@www.surgeon.fullrpt.pdf`
+
+**State Management:**
+- Progress saved after EVERY file completion
+- Pending list rebuilt on resume to match actual files
+- Failed files tracked with full error details
+- Completion rate calculated dynamically
+
+### Common Issues and Solutions
+
+**"File name too long" error:**
+- Solution: Scan docs/ directory for actual files instead of using Excel titles
+
+**AttributeError: 'NoneType' object has no attribute 'get':**
+- Solution: Initialize search_resolution_results as empty dict, not None
+
+**"list.remove(x): x not in list" error:**
+- Solution: Check membership before removal, rebuild pending list on resume
+
+**API key not found:**
+- Solution: Check both GOOGLE_API_KEY and GEMINI_API_KEY environment variables
+
+**Files not matching Excel entries during CLI processing:**
+- Solution: Use `check_single_folder.py` to analyze filename matching
+- Check URL parsing consistency - ensure all scripts use `get_filename_from_url()`
+- The tool shows exact match rates and identifies problematic files
+
+### Development Workflow
+
+**Adding New Features:**
+1. Check existing patterns in `cli.py` for similar functionality
+2. Follow Pydantic models in `get_metadata.py` for data structures
+3. Use existing confidence scoring patterns
+4. Add command-line arguments following existing convention
+
+**Testing Changes:**
+1. Test with single file first: `python cli.py docs/test.pdf`
+2. Test batch with small limit: `python cli.py --batch --limit 3`
+3. Test resume capability by interrupting and restarting
+4. Verify Excel exports contain expected data
+
+**Debugging:**
+- Use `--verbose` flag for detailed output
+- Check `batch_progress.json` for processing state
+- Review Excel exports for patterns in discrepancies
+- Monitor thread names in verbose output for concurrent issues
