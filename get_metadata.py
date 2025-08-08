@@ -16,6 +16,11 @@ from dataclasses import dataclass
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Suppress httpx INFO logs (only show warnings and errors)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+# Suppress Google GenAI INFO logs
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+
 # --- Pydantic Models for Structured Output ---
 
 class DocType(str, Enum):
@@ -498,6 +503,7 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file, rate_lim
                 config={
                     'response_mime_type': 'application/json',
                     'response_schema': DocumentMetadata,
+                    'temperature': 0
                 }
             )
             

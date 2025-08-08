@@ -328,8 +328,7 @@ from ground_truth_validation import (
     print_ground_truth_stats
 )
 
-# Rolling workers architecture is now integrated directly in this file
-ROLLING_AVAILABLE = True
+# Rolling workers architecture is the only batch processing method
 
 # Rate limiting classes for Gemini API
 @dataclass
@@ -559,7 +558,6 @@ class BatchResults:
             'failed': 0,
             'avg_confidence': 0.0,
             'avg_accuracy': 0.0,
-            'total_discrepancies': 0,
             'search_resolutions': 0
         }
     
@@ -585,9 +583,6 @@ class BatchResults:
                 if comparison_results.get('overall_accuracy'):
                     self.summary_stats['avg_accuracy'] += comparison_results['overall_accuracy']
                 
-                discrepancies = comparison_results.get('discrepancies', {})
-                self.summary_stats['total_discrepancies'] += len(discrepancies)
-                
                 search_resolved = result_data.get('search_resolution_results', {}).get('resolved')
                 if search_resolved:
                     self.summary_stats['search_resolutions'] += len(search_resolved)
@@ -606,6 +601,19 @@ class BatchResults:
                 stats['avg_confidence'] /= stats['successful']
                 stats['avg_accuracy'] /= stats['successful']
             return stats
+    
+    def calculate_final_stats(self) -> Dict[str, Any]:
+        """Calculate final statistics from actual export data (single source of truth)."""
+        with self._lock:
+            # Count from deviation_log (actual unresolved discrepancies)
+            unresolved_discrepancies = sum(len(entry.get("all_deviations", [])) for entry in self.deviation_log if isinstance(entry, dict))
+            files_with_discrepancies = sum(1 for entry in self.deviation_log if isinstance(entry, dict) and entry.get("all_deviations"))
+            
+            return {
+                'unresolved_discrepancies': unresolved_discrepancies,
+                'files_with_discrepancies': files_with_discrepancies,
+                'search_resolutions': self.summary_stats['search_resolutions']
+            }
     
     def export_results(self, output_path: str, append_mode: bool = False):
         """Export all results to Excel file.
@@ -665,6 +673,19 @@ class BatchResults:
                             # Add search resolution info if this field was resolved
                             if search_results and search_results.get('resolved') and field_name in search_results['resolved']:
                                 resolution = search_results['resolved'][field_name]
+                                # Derive resolved_value if missing, based on choice and known discrepancy
+                                if 'resolved_value' not in resolution:
+                                    choice = resolution.get('choice')
+                                    if choice == 'extracted':
+                                        resolution['resolved_value'] = (
+                                            discrepancies.get(field_name, {}).get('extracted')
+                                            if isinstance(discrepancies, dict) and field_name in discrepancies else value
+                                        )
+                                    elif choice == 'reference':
+                                        resolution['resolved_value'] = (
+                                            discrepancies.get(field_name, {}).get('reference')
+                                            if isinstance(discrepancies, dict) and field_name in discrepancies else None
+                                        )
                                 row[f'{field_name}_search_resolved'] = resolution.get('resolved_value', '')
                                 row[f'{field_name}_search_confidence'] = resolution.get('confidence', 0.0)
                                 row[f'{field_name}_search_recommendation'] = resolution.get('recommendation', '')
@@ -730,6 +751,9 @@ class BatchResults:
                 filename = Path(result['filename']).name
                 results_by_filename[filename] = result
             
+            # Track which files actually matched ground truth rows
+            matched_files = set()
+            
             # Update each row with extracted/resolved values
             for idx, row in updated_df.iterrows():
                 # Try to match by URL filename (handle docx→pdf conversions)
@@ -749,6 +773,8 @@ class BatchResults:
                                 break
                     
                     if matched_filename:
+                        # Track that we matched this file
+                        matched_files.add(matched_filename)
                         result = results_by_filename[matched_filename]
                         metadata = result.get('metadata')
                         comparison = result.get('comparison_results') or {}
@@ -836,8 +862,8 @@ class BatchResults:
             # Save the updated Excel file
             updated_df.to_excel(output_path, index=False)
             
-            # Count statistics
-            total_processed = sum(1 for f in results_by_filename.keys() if f in [Path(u).name for u in updated_df['public_file_url'].dropna()])
+            # Count statistics - use the actual matched files we tracked
+            total_processed = len(matched_files)
             flagged_count = updated_df['flagged_for_review'].sum()
             updated_count = updated_df['updated'].sum()
             
@@ -1007,8 +1033,9 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
             model="gemini-2.5-flash",
             contents=[analysis_prompt],
             config=types.GenerateContentConfig(
-                tools=[grounding_tool]  # Enable search grounding
-                # Note: response_mime_type='application/json' is incompatible with tools
+                tools=[grounding_tool],  # Enable search grounding
+                temperature=0
+                # Note: structured output still not fully compatible with tools in current version
             )
         )
         
@@ -1874,7 +1901,7 @@ def export_batch_results(batch_results: BatchResults, args, ground_truth_path: s
     
     # Check if resuming and get saved export paths
     progress = getattr(batch_results, 'progress', None)
-    is_resuming = args.resume and progress and hasattr(progress, 'export_results_path') and progress.export_results_path
+    is_resuming = bool(args.resume and progress and getattr(progress, 'export_results_path', None))
     
     # Determine export file paths
     if is_resuming and progress.export_results_path:
@@ -1900,7 +1927,7 @@ def export_batch_results(batch_results: BatchResults, args, ground_truth_path: s
     
     # 1. Export results
     try:
-        batch_results.export_results(results_path, append_mode=is_resuming)
+        batch_results.export_results(results_path, append_mode=bool(is_resuming))
         if not is_resuming:
             print(f"📊 Batch results exported to: {results_path}")
     except Exception as e:
@@ -1909,10 +1936,9 @@ def export_batch_results(batch_results: BatchResults, args, ground_truth_path: s
     # 2. Export deviations (always if any exist)
     if batch_results.deviation_log:
         try:
-            export_path = export_deviations_to_excel(batch_results.deviation_log, deviations_path, append_mode=is_resuming)
+            export_path = export_deviations_to_excel(batch_results.deviation_log, deviations_path, append_mode=bool(is_resuming))
             if export_path and not is_resuming:
                 print(f"📊 Batch deviations exported to: {export_path}")
-                print(f"   • Total deviations tracked: {len(batch_results.deviation_log)}")
         except Exception as e:
             print(f"❌ Error exporting batch deviations: {e}")
     else:
@@ -1976,247 +2002,7 @@ def find_pdf_files(docs_dir: str, excel_data: pd.DataFrame) -> Dict[str, str]:
     
     return pdf_files
 
-def batch_process_pdfs(excel_path: str, docs_dir: str, api_key: str,
-                      workers: int = 4, batch_size: int = 50,
-                      enable_search: bool = False, search_threshold: float = 0.8,
-                      resume: bool = False, progress_file: str = "batch_progress.json",
-                      verbose: bool = False, limit: Optional[int] = None, 
-                      retry_failed: bool = False, max_retries: int = 3) -> BatchResults:
-    """Process multiple PDFs concurrently with progress tracking and resume capability."""
-    
-    print(f"🚀 Starting batch processing with {workers} workers")
-    print(f"📊 Excel file: {excel_path}")
-    print(f"📁 Docs directory: {docs_dir}")
-    
-    # Load ground truth data once
-    print("Loading ground truth data...")
-    ground_truth = load_ground_truth_metadata(excel_path)
-    excel_data = pd.read_excel(excel_path)
-    print_ground_truth_stats(ground_truth)
-    
-    # Find PDF files
-    print("\nDiscovering PDF files...")
-    pdf_files = find_pdf_files(docs_dir, excel_data)
-    print(f"Found {len(pdf_files)} PDF files to process")
-    
-    if not pdf_files:
-        print("❌ No PDF files found matching Excel data")
-        return BatchResults()
-    
-    # Initialize or load progress
-    progress = None
-    if resume or retry_failed:
-        progress = BatchProgress.load_from_file(progress_file)
-        if progress:
-            if retry_failed:
-                print(f"🔄 Retrying {len(progress.failed)} failed files from checkpoint")
-            else:
-                print(f"📈 Resuming from checkpoint: {len(progress.completed)}/{progress.total_files} completed")
-    
-    if not progress:
-        if retry_failed:
-            print(f"❌ No progress file found at {progress_file}. Cannot retry failed files.")
-            return BatchResults()
-        
-        # Backup existing progress file before creating new one
-        if os.path.exists(progress_file):
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_file = progress_file.replace('.json', f'_backup_{timestamp}.json')
-            try:
-                import shutil
-                shutil.copy2(progress_file, backup_file)
-                print(f"💾 Existing progress backed up to: {backup_file}")
-            except Exception as e:
-                print(f"⚠️  Warning: Could not backup existing progress file: {e}")
-        
-        # Create new progress tracker
-        progress = BatchProgress(
-            total_files=len(pdf_files),
-            completed=[],
-            failed=[],
-            pending=list(pdf_files.keys()),
-            start_time=datetime.datetime.now().isoformat(),
-            last_checkpoint=datetime.datetime.now().isoformat()
-        )
-        print(f"📋 Starting fresh batch processing of {len(pdf_files)} files")
-    
-    # Filter files based on mode
-    if retry_failed:
-        # Extract filenames from failed entries (they might be dicts with 'filename' key)
-        failed_filenames = []
-        for item in progress.failed:
-            if isinstance(item, dict):
-                failed_filenames.append(item.get('filename', item))
-            else:
-                failed_filenames.append(item)
-        
-        # Only process previously failed files
-        pending_files = {k: v for k, v in pdf_files.items() if k in failed_filenames}
-        if not pending_files:
-            print("✅ No failed files to retry!")
-            return BatchResults()
-        print(f"🔄 Retrying {len(pending_files)} failed files")
-        # Note: We don't clear progress.failed here - only remove files that are successfully processed
-    else:
-        # Filter out already completed files and rebuild pending list
-        pending_files = {k: v for k, v in pdf_files.items() if k not in progress.completed}
-        progress.pending = list(pending_files.keys())  # Rebuild pending list to match current files
-        print(f"📝 Processing {len(pending_files)} remaining files")
-    
-    # Apply limit if specified (for testing) - AFTER filtering for retry_failed
-    if limit and limit < len(pending_files):
-        pending_files_list = list(pending_files.items())[:limit]
-        pending_files = dict(pending_files_list)
-        print(f"Limited to first {limit} files for testing")
-    
-    if not pending_files:
-        print("✅ All files already processed!")
-        # Still return a results collector with progress attached for export functionality
-        results_collector = BatchResults()
-        results_collector.progress = progress
-        return results_collector
-    
-    # Initialize results collector
-    results_collector = BatchResults()
-    results_collector.progress = progress  # Attach progress for export path tracking
-    
-    # Process files in batches with concurrent execution
-    file_items = list(pending_files.items())
-    processed_count = len(progress.completed)
-    start_time = time.time()
-    
-    # Adaptive worker scaling based on rate limit utilization
-    base_workers = workers
-    current_workers = workers
-    scaling_check_interval = 10  # Check every 10 files
-    
-    # Create thread pool and process files
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        # Process in batches to manage memory
-        for batch_start in range(0, len(file_items), batch_size):
-            batch_end = min(batch_start + batch_size, len(file_items))
-            batch_files = file_items[batch_start:batch_end]
-            
-            # Check if we should adjust worker count
-            if processed_count % scaling_check_interval == 0 and GEMINI_RATE_LIMITER:
-                optimal_workers = calculate_optimal_workers(GEMINI_RATE_LIMITER, base_workers)
-                current_rate = GEMINI_RATE_LIMITER.get_current_rate()
-                utilization = current_rate / GEMINI_RATE_LIMITER.max_requests_per_minute * 100
-                
-                if optimal_workers != current_workers:
-                    print(f"🔄 Rate limit utilization: {utilization:.1f}% - adjusting workers: {current_workers} → {optimal_workers}")
-                    current_workers = optimal_workers
-                    # Note: We can't dynamically resize ThreadPoolExecutor, so this is informational
-                    # In a real implementation, we'd need to restart the executor or use a different approach
-                elif verbose and processed_count % (scaling_check_interval * 2) == 0:
-                    print(f"📊 Rate limit utilization: {utilization:.1f}% - workers: {current_workers}")
-            
-            print(f"\n📦 Processing batch {batch_start//batch_size + 1}: files {batch_start+1}-{batch_end}")
-            
-            # Submit batch to thread pool (limited by current batch size for memory management)
-            batch_workers = min(current_workers, len(batch_files))
-            future_to_file = {
-                executor.submit(
-                    process_single_pdf_batch,
-                    pdf_path, ground_truth, api_key, progress, results_collector,
-                    enable_search, search_threshold, verbose, GEMINI_RATE_LIMITER, SEARCH_QUOTA_TRACKER
-                ): filename
-                for filename, pdf_path in batch_files
-            }
-            
-            # Collect results as they complete
-            for future in as_completed(future_to_file):
-                filename = future_to_file[future]
-                processed_count += 1
-                
-                try:
-                    success = future.result()
-                    if success:
-                        progress.completed.append(filename)
-                        # If this is retry mode, remove from failed list
-                        if retry_failed:
-                            progress.failed = [item for item in progress.failed 
-                                             if (isinstance(item, dict) and item.get('filename') != filename) or 
-                                                (isinstance(item, str) and item != filename)]
-                    else:
-                        progress.failed.append({
-                            'filename': filename,
-                            'timestamp': datetime.datetime.now().isoformat(),
-                            'error': 'Processing failed'
-                        })
-                    
-                    # Update progress (safe removal)
-                    if filename in progress.pending:
-                        progress.pending.remove(filename)
-                    progress.last_checkpoint = datetime.datetime.now().isoformat()
-                    
-                    # Print progress
-                    elapsed = time.time() - start_time
-                    rate = processed_count / elapsed if elapsed > 0 else 0
-                    eta = (progress.total_files - processed_count) / rate if rate > 0 else 0
-                    
-                    print(f"[{processed_count:4d}/{progress.total_files}] {filename} | Rate: {rate:.2f} files/sec | ETA: {eta/60:.1f}min")
-                    
-                    # Save progress after EVERY completion
-                    progress.save_to_file(progress_file)
-                    
-                    # Show summary every 10 files
-                    if processed_count % 10 == 0:
-                        summary = results_collector.get_summary()
-                        print(f"  📊 Success rate: {summary['successful']}/{summary['total_processed']} ({summary['successful']/summary['total_processed']:.1%})")
-                
-                except Exception as e:
-                    print(f"❌ Unexpected error processing {filename}: {e}")
-                    progress.failed.append({
-                        'filename': filename,
-                        'timestamp': datetime.datetime.now().isoformat(),
-                        'error': str(e)
-                    })
-                    # Safe removal from pending
-                    if filename in progress.pending:
-                        progress.pending.remove(filename)
-                    progress.last_checkpoint = datetime.datetime.now().isoformat()
-                    
-                    # Save progress immediately after error too
-                    progress.save_to_file(progress_file)
-    
-    # Save final progress
-    progress.save_to_file(progress_file)
-    
-    # Print final summary
-    total_time = time.time() - start_time
-    summary = results_collector.get_summary()
-    
-    print(f"\n🎉 BATCH PROCESSING COMPLETE")
-    print(f"{'='*50}")
-    print(f"Total time: {total_time/60:.1f} minutes")
-    print(f"Files processed: {summary['total_processed']}")
-    print(f"Success rate: {summary['successful']}/{summary['total_processed']} ({summary['successful']/summary['total_processed']:.1%})")
-    print(f"Average confidence: {summary['avg_confidence']:.2f}")
-    print(f"Average accuracy: {summary['avg_accuracy']:.1%}")
-    print(f"Total discrepancies: {summary['total_discrepancies']}")
-    print(f"Search resolutions: {summary['search_resolutions']}")
-    
-    if progress.failed:
-        print(f"\n❌ Failed files ({len(progress.failed)}):")
-        for failure in progress.failed[-10:]:  # Show last 10 failures
-            try:
-                filename = failure.get('filename', 'unknown file') if isinstance(failure, dict) else str(failure)
-                error = failure.get('error', 'unknown error') if isinstance(failure, dict) else 'unknown error'
-                retry_count = failure.get('retry_count', 0) if isinstance(failure, dict) else 0
-                retry_info = f" (after {retry_count} retries)" if retry_count > 0 else ""
-                print(f"  • {filename}: {error}{retry_info}")
-            except Exception as e:
-                print(f"  • [Error displaying failure]: {e}")
-                print(f"    Raw failure data: {failure}")
-        
-        print(f"\nRun with --verbose for detailed failure analysis")
-    
-    # Generate failure analysis report
-    if progress.failed:
-        generate_failure_analysis(progress.failed, verbose=verbose)
-    
-    return results_collector
+# Old batch_process_pdfs function removed - use rolling_batch_process_pdfs instead
 
 # Rolling Workers Architecture Classes
 class FileProducer(threading.Thread):
@@ -2624,9 +2410,12 @@ def rolling_batch_process_pdfs(excel_path: str, docs_dir: str, api_key: str,
     
     if results_collector.results:
         summary = results_collector.get_summary()
+        final_stats = results_collector.calculate_final_stats()
+        
         print(f"Average confidence: {summary['avg_confidence']:.2f}")
         print(f"Average accuracy: {summary['avg_accuracy']:.1%}")
-        print(f"Search resolutions: {summary['search_resolutions']}")
+        print(f"Search resolutions: {final_stats['search_resolutions']}")
+        print(f"Unresolved discrepancies: {final_stats['unresolved_discrepancies']} across {final_stats['files_with_discrepancies']} files")
     
     return results_collector
 
@@ -2657,20 +2446,20 @@ def main():
     parser.add_argument('--export-unresolved', help='Export unresolved items to Excel file')
     parser.add_argument('--log-decisions', help='Log all user decisions to JSON file')
     
-    # Batch processing options
-    parser.add_argument('--batch', action='store_true', help='Enable batch processing mode')
+    # Batch processing options (uses rolling architecture)
+    parser.add_argument('--batch', action='store_true', help='Enable batch processing mode (uses rolling workers)')
     parser.add_argument('--docs-dir', default='docs', help='Directory containing PDF files (default: docs)')
     parser.add_argument('--workers', type=int, default=10, help='Number of concurrent workers (default: 10)')
-    parser.add_argument('--batch-size', type=int, default=50, help='Process files in batches of this size (default: 50)')
     parser.add_argument('--resume', action='store_true', help='Resume batch processing from last checkpoint')
     parser.add_argument('--retry-failed', action='store_true', help='Retry only failed files from batch_progress.json')
     parser.add_argument('--progress-file', default='batch_progress.json', help='Progress tracking file (default: batch_progress.json)')
-    
-    # Rolling workers architecture options
-    parser.add_argument('--rolling', action='store_true', help='Use rolling workers architecture for 25-40% performance improvement')
-    parser.add_argument('--max-workers', type=int, default=50, help='Maximum workers for dynamic scaling (default: 50, only with --rolling)')
+    parser.add_argument('--max-workers', type=int, default=50, help='Maximum workers for dynamic scaling (default: 50)')
     parser.add_argument('--auto-scale', action='store_true', default=True, help='Enable dynamic worker scaling based on rate utilization (default: True)')
     parser.add_argument('--no-auto-scale', action='store_false', dest='auto_scale', help='Disable dynamic worker scaling')
+    
+    # Deprecated options (kept for backwards compatibility)
+    parser.add_argument('--batch-size', type=int, default=50, help='DEPRECATED: Not used in rolling architecture')
+    parser.add_argument('--rolling', action='store_true', help='DEPRECATED: Rolling is now default for batch mode')
     
     # Batch output options
     parser.add_argument('--batch-results', help='Export all batch results to Excel file')
@@ -2723,35 +2512,28 @@ def main():
             print(f"Error: Docs directory not found: {args.docs_dir}")
             return 1
         
-        # Validate rolling architecture options
+        # Show deprecation warnings for legacy options
         if args.rolling:
-            if not ROLLING_AVAILABLE:
-                print("Error: Rolling workers architecture not available (rolling_batch.py not found)")
-                return 1
+            print("ℹ️  Note: --rolling is now default for batch mode (option is deprecated)")
+        
+        if args.batch_size != 50:  # Only warn if user explicitly set it
+            print("⚠️  Warning: --batch-size is deprecated (rolling architecture doesn't use batches)")
+        
+        # Validate worker options (rolling is now always used)
+        if args.workers <= 0 or args.workers > 100:
+            print("Error: Number of workers must be between 1 and 100")
+            return 1
             
-            if args.workers <= 0 or args.workers > 100:
-                print("Error: Number of workers must be between 1 and 100 for rolling architecture")
-                return 1
-                
-            if args.max_workers <= 0 or args.max_workers > 100:
-                print("Error: Max workers must be between 1 and 100")
-                return 1
-                
-            if args.workers > args.max_workers:
-                print("Error: Initial workers cannot exceed max workers")
-                return 1
-        else:
-            # Traditional batch processing limits
-            if args.workers <= 0 or args.workers > 20:
-                print("Error: Number of workers must be between 1 and 20 for traditional batch processing")
-                return 1
+        if args.max_workers <= 0 or args.max_workers > 100:
+            print("Error: Max workers must be between 1 and 100")
+            return 1
+            
+        if args.workers > args.max_workers:
+            print("Error: Initial workers cannot exceed max workers")
+            return 1
         
         if hasattr(args, 'max_retries') and (args.max_retries < 0 or args.max_retries > 10):
             print("Error: Max retries must be between 0 and 10")
-            return 1
-        
-        if not args.rolling and args.batch_size <= 0:
-            print("Error: Batch size must be greater than 0")
             return 1
         
         # Interactive modes are not compatible with batch processing
@@ -2786,56 +2568,32 @@ def main():
         
         # Branch to batch or single file processing
         if args.batch:
-            # Choose batch processing architecture
-            if args.rolling:
-                # Rolling workers architecture
-                print(f"\n🚀 ROLLING BATCH PROCESSING MODE")
-                print(f"{'='*50}")
-                print(f"🎯 Performance improvement expected: 25-40% faster than traditional batching")
-                if args.auto_scale:
-                    print(f"📈 Dynamic scaling enabled: {args.workers}-{args.max_workers} workers")
-                else:
-                    print(f"🔒 Fixed workers: {args.workers}")
-                
-                batch_results = rolling_batch_process_pdfs(
-                    excel_path=args.excel,
-                    docs_dir=args.docs_dir,
-                    api_key=args.api_key,
-                    workers=args.workers,
-                    enable_search=enable_search,
-                    search_threshold=args.search_threshold,
-                    resume=args.resume,
-                    progress_file=args.progress_file,
-                    verbose=args.verbose,
-                    limit=args.limit,
-                    retry_failed=args.retry_failed,
-                    max_retries=getattr(args, 'max_retries', 3),
-                    max_workers=args.max_workers,
-                    auto_scale=args.auto_scale
-                )
+            # Always use rolling workers architecture (old batch function removed)
+            print(f"\n🚀 BATCH PROCESSING MODE")
+            print(f"{'='*50}")
+            if args.auto_scale:
+                print(f"📈 Dynamic scaling enabled: {args.workers}-{args.max_workers} workers")
             else:
-                # Traditional batch processing mode
-                print(f"\n🚀 TRADITIONAL BATCH PROCESSING MODE")
-                print(f"{'='*50}")
-                print(f"💡 Tip: Use --rolling for 25-40% performance improvement!")
-                
-                batch_results = batch_process_pdfs(
-                    excel_path=args.excel,
-                    docs_dir=args.docs_dir,
-                    api_key=args.api_key,
-                    workers=args.workers,
-                    batch_size=args.batch_size,
-                    enable_search=enable_search,
-                    search_threshold=args.search_threshold,
-                    resume=args.resume,
-                    progress_file=args.progress_file,
-                    verbose=args.verbose,
-                    retry_failed=args.retry_failed,
-                    limit=args.limit,
-                    max_retries=getattr(args, 'max_retries', 3)  # Use getattr for backwards compatibility
-                )
+                print(f"🔒 Fixed workers: {args.workers}")
             
-            # ALWAYS export all batch results automatically for both traditional and rolling modes
+            batch_results = rolling_batch_process_pdfs(
+                excel_path=args.excel,
+                docs_dir=args.docs_dir,
+                api_key=args.api_key,
+                workers=args.workers,
+                enable_search=enable_search,
+                search_threshold=args.search_threshold,
+                resume=args.resume,
+                progress_file=args.progress_file,
+                verbose=args.verbose,
+                limit=args.limit,
+                retry_failed=args.retry_failed,
+                max_retries=getattr(args, 'max_retries', 3),
+                max_workers=args.max_workers,
+                auto_scale=args.auto_scale
+            )
+            
+            # ALWAYS export all batch results automatically
             if batch_results:
                 export_batch_results(batch_results, args)
             
