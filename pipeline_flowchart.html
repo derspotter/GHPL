@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GHPL Pipeline Flowchart</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'default', flowchart: { curve: 'basis' } });</script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .mermaid {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <h1>GHPL CLI Pipeline Flowchart</h1>
+    
+    <div style="background: #f8f9fa; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #dee2e6;">
+        <h2 style="color: #495057; margin-top: 0; font-size: 1.2em;">📊 Dataset Statistics</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 15px;">
+            <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size: 1.8em; font-weight: bold; color: #28a745;">2,725</div>
+                <div style="color: #6c757d; font-size: 0.9em;">Total Excel Entries</div>
+            </div>
+            <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size: 1.8em; font-weight: bold; color: #007bff;">2,451</div>
+                <div style="color: #6c757d; font-size: 0.9em;">Clean PDFs Ready (89.9%)</div>
+            </div>
+            <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size: 1.8em; font-weight: bold; color: #ffc107;">210</div>
+                <div style="color: #6c757d; font-size: 0.9em;">Converted from DOCX</div>
+            </div>
+            <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size: 1.8em; font-weight: bold; color: #dc3545;">110</div>
+                <div style="color: #6c757d; font-size: 0.9em;">Invalid/Corrupted (4.0%)</div>
+            </div>
+            <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size: 1.8em; font-weight: bold; color: #6c757d;">21</div>
+                <div style="color: #6c757d; font-size: 0.9em;">Duplicates Removed</div>
+            </div>
+            <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size: 1.8em; font-weight: bold; color: #17a2b8;">143</div>
+                <div style="color: #6c757d; font-size: 0.9em;">Missing/Never Downloaded</div>
+            </div>
+        </div>
+        <div style="margin-top: 20px; padding: 15px; background: #e9ecef; border-radius: 6px;">
+            <h3 style="color: #495057; margin: 0 0 10px 0; font-size: 1.1em;">🔄 Current Batch Progress</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <strong>1,840 completed</strong> out of 2,451 total files
+                </div>
+                <div style="background: #28a745; color: white; padding: 5px 12px; border-radius: 12px; font-weight: bold;">
+                    75.1% Complete
+                </div>
+            </div>
+            <div style="background: #f8f9fa; border-radius: 10px; height: 8px; margin-top: 8px; overflow: hidden;">
+                <div style="background: linear-gradient(90deg, #28a745 0%, #20c997 100%); height: 100%; width: 75.1%; transition: width 0.3s ease;"></div>
+            </div>
+            <div style="margin-top: 10px; font-size: 0.9em; color: #6c757d;">
+                <strong>611 files remaining</strong> • 0 failures • Excellent progress! 🎉
+            </div>
+        </div>
+    </div>
+    
+    <div class="mermaid">
+flowchart TD
+    Start([User runs CLI command]) --> ParseArgs[Parse Command Line Arguments]
+    ParseArgs --> CheckMode{Batch Mode?}
+    
+    %% Single File Path
+    CheckMode -->|Single File| SingleMode[Single File Processing]
+    SingleMode --> LoadGTSingle[Load Ground Truth from Excel]
+    LoadGTSingle --> CoreProcessing[process_pdf_with_validation]
+    
+    %% Batch Processing Path  
+    CheckMode -->|Batch| BatchMode[Batch Processing Setup]
+    BatchMode --> LoadProgress{Resume Mode?}
+    LoadProgress -->|Yes| LoadSaved[Load batch_progress.json]
+    LoadProgress -->|No| CreateProgress[Create New Progress Tracker]
+    
+    LoadSaved --> FilterFiles[Filter Pending Files]
+    CreateProgress --> FilterFiles
+    FilterFiles --> LoadGTBatch[Load Ground Truth from Excel]
+    LoadGTBatch --> InitBatch[Initialize ThreadPoolExecutor & Results]
+    InitBatch --> BatchLoop[For Each PDF File]
+    
+    BatchLoop --> RateLimit[Apply Rate Limiting]
+    RateLimit --> CoreProcessing
+    
+    %% Core Processing Function (Shared)
+    subgraph CoreFunc[" process_pdf_with_validation() "]
+        CoreProcessing --> ExtractMeta[Extract Metadata via Gemini API]
+        ExtractMeta --> CompareGT[Compare with Ground Truth]
+        CompareGT --> HasDiscrepancy{Discrepancies Found?}
+        
+        HasDiscrepancy -->|Yes| SearchEnabled{Search Grounding Enabled?}
+        HasDiscrepancy -->|No| ReturnResults[Return Results]
+        
+        SearchEnabled -->|Yes| SearchResolve[Query Gemini with Google Search]
+        SearchEnabled -->|No| InteractiveCheck{Interactive Mode?}
+        
+        SearchResolve --> ApplySearch[Apply Search Resolutions]
+        ApplySearch --> StillConflicts{Remaining Conflicts?}
+        
+        StillConflicts -->|Yes| InteractiveCheck
+        StillConflicts -->|No| ReturnResults
+        
+        InteractiveCheck -->|Yes| UserPrompt[Prompt User for Resolution]
+        InteractiveCheck -->|No| AdjustConfidence[Adjust Confidence Scores]
+        
+        UserPrompt --> UpdateMeta[Update Metadata]
+        UpdateMeta --> ReturnResults
+        AdjustConfidence --> ReturnResults
+    end
+    
+    %% Single File Completion
+    ReturnResults --> IsSingleMode{Single File Mode?}
+    IsSingleMode -->|Yes| DisplayResults[Display Results & Recommendations]
+    DisplayResults --> ExportSingle{Export Requested?}
+    ExportSingle -->|Yes| ExportCorrections[Export Corrections/Decisions]
+    ExportSingle -->|No| EndSingle([Complete])
+    ExportCorrections --> EndSingle
+    
+    %% Batch Processing Continuation
+    IsSingleMode -->|No| BatchRetry{Processing Success?}
+    BatchRetry -->|No| CheckRetries{Retries < Max?}
+    CheckRetries -->|Yes| Backoff[Exponential Backoff Wait]
+    Backoff --> CoreProcessing
+    CheckRetries -->|No| LogFailure[Log to Failed List]
+    
+    BatchRetry -->|Yes| CollectResult[Add to Results Collection]
+    LogFailure --> UpdateProgress[Update batch_progress.json]
+    CollectResult --> UpdateProgress
+    
+    UpdateProgress --> MoreFiles{More Files to Process?}
+    MoreFiles -->|Yes| BatchLoop
+    MoreFiles -->|No| ExportPhase[Export Results to Excel]
+    
+    %% Export Phase
+    ExportPhase --> CheckExisting{Existing Export Paths?}
+    CheckExisting -->|Yes & Resume| AppendMode[Append to Existing Files]
+    CheckExisting -->|No| NewFiles[Generate New Timestamped Files]
+    
+    AppendMode --> DoExports[Export to Excel Files]
+    NewFiles --> DoExports
+    
+    DoExports --> ExportResults[Results.xlsx]
+    DoExports --> ExportDeviations[Deviations.xlsx]
+    DoExports --> ExportGroundTruth[Ground Truth.xlsx]
+    
+    ExportResults --> ShowSummary[Display Summary Statistics]
+    ExportDeviations --> ShowSummary
+    ExportGroundTruth --> ShowSummary
+    
+    ShowSummary --> EndBatch([Batch Complete])
+    
+    %% Styling
+    style Start fill:#e1f5e1
+    style EndSingle fill:#ffe1e1
+    style EndBatch fill:#ffe1e1
+    style CoreFunc fill:#e7f3ff,stroke:#0066cc,stroke-width:3px
+    style SearchResolve fill:#fff3cd
+    style ExportPhase fill:#d4edda
+    
+    %% Highlight core processing components
+    classDef coreProcess fill:#e7f3ff,stroke:#0066cc,stroke-width:2px
+    class CoreProcessing,ExtractMeta,CompareGT,SearchResolve,ApplySearch,InteractiveCheck,UserPrompt,AdjustConfidence,UpdateMeta,ReturnResults coreProcess
+    </div>
+</body>
+</html>

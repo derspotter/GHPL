@@ -1,7 +1,9 @@
 import pandas as pd
 import datetime
+import os
 from pathlib import Path
 from typing import Dict, Optional, List
+from urllib.parse import urlparse, unquote
 from get_metadata import DocumentMetadata, calculate_overall_confidence
 
 def load_ground_truth_metadata(excel_path: str) -> dict:
@@ -17,8 +19,11 @@ def load_ground_truth_metadata(excel_path: str) -> dict:
         # Extract filename from public_file_url if available
         if pd.notna(row.get('public_file_url')):
             url = row['public_file_url']
-            filename = Path(url).stem.split('/')[-1]  # Get the last part after splitting by /
-            filename = filename.replace('%20', ' ').replace('%28', '(').replace('%29', ')')  # Basic URL decoding
+            # Use same URL parsing as check_single_folder.py
+            parsed_url = urlparse(url)
+            filename = Path(os.path.basename(unquote(parsed_url.path))).stem
+            # Handle additional URL encoding
+            filename = filename.replace('%20', ' ').replace('%28', '(').replace('%29', ')')
         else:
             # Fallback to using id if no URL
             filename = f"doc_{row.get('id', 'unknown')}"
@@ -315,11 +320,9 @@ def export_deviations_to_excel(deviation_log: list, output_path: str = "all_devi
             except Exception as e:
                 print(f"Warning: Could not append to existing deviations file, overwriting: {e}")
                 new_df.to_excel(output_path, index=False)
-                print(f"All deviations exported to: {output_path}")
         else:
             # Normal mode - overwrite file
             new_df.to_excel(output_path, index=False)
-            print(f"All deviations exported to: {output_path}")
         
         return output_path
     else:

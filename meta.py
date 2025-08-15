@@ -50,7 +50,7 @@ class GovernanceLevel(str, Enum):
     """Enumeration for governance levels."""
     NATIONAL = "National"
     REGIONAL = "Regional"
-    GLOBAL = "Global"
+    INTERNATIONAL = "International"
 
 class ConfidenceLevel(str, Enum):
     """Confidence level categories for metadata extraction."""
@@ -363,7 +363,7 @@ def extract_metadata_from_pdf_subset(client, first_pages_file, last_pages_file, 
         **level** MUST be EXACTLY one of these values (no other values allowed):
         - "National"
         - "Regional"
-        - "Global"
+        - "International"
         
         If you cannot determine which enum value applies, set the value to null rather than guessing or creating new values.
         
@@ -566,7 +566,7 @@ def display_field(name: str, field):
         print(f"{name}: {display_value}")
         print(f"  ├─ Confidence: {field.confidence:.2f} ({confidence_level.value})")
         if field.evidence:
-            print(f"  ├─ Evidence: {field.evidence[:100]}...")  # Truncate long evidence
+            print(f"  ├─ Evidence: {field.evidence}")  # Show full evidence
         if field.source_page:
             print(f"  ├─ Source: Page {field.source_page}")
         if field.alternatives:

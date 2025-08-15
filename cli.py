@@ -712,11 +712,9 @@ class BatchResults:
                 except Exception as e:
                     print(f"Warning: Could not append to existing file, overwriting: {e}")
                     new_df.to_excel(output_path, index=False)
-                    print(f"Batch results exported to: {output_path}")
             else:
                 # Normal mode - overwrite file
                 new_df.to_excel(output_path, index=False)
-                print(f"Batch results exported to: {output_path}")
             
             return output_path
     
@@ -899,7 +897,7 @@ class SearchResolutionResponse(pydantic.BaseModel):
     overall_confidence: float = pydantic.Field(ge=0.0, le=1.0, description="Overall confidence in resolutions")
 
 # Search grounding functions for automatic conflict resolution
-def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filename: str, client, verbose: bool = True) -> dict:
+def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filename: str, client, uploaded_files=None, verbose: bool = True) -> dict:
     """Use ONE search to resolve ALL metadata conflicts for this document."""
     
     if verbose:
@@ -911,15 +909,9 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
     for field_name, conflict_data in discrepancies.items():
         conflict_summary.append(f"• {field_name}: Extracted='{conflict_data['extracted']}' vs Reference='{conflict_data['reference']}'")
     
-    # Extract document context for search
-    title = extracted_metadata.title.value or Path(pdf_filename).stem.replace("_", " ")
-    country = extracted_metadata.country.value or "unknown country"
-    
+    # Show conflicts without biasing toward extracted values
     if verbose:
-        print(f"Document context:")
-        print(f"  Title: {title}")
-        print(f"  Country: {country}")
-        print(f"  Filename: {Path(pdf_filename).stem}")
+        print(f"Document: {Path(pdf_filename).name}")
         print(f"\nConflicts to resolve ({len(discrepancies)}):")
         for conflict in conflict_summary:
             print(f"  {conflict}")
@@ -940,15 +932,39 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
             "reasoning": "explanation of why this choice was made based on search results"
         }
     
-    analysis_prompt = f"""
-    I have multiple metadata conflicts for a health policy document from {country}:
-    Document title: "{title}"
-    Filename: {Path(pdf_filename).stem}
+    # Build minimal context from ONLY uncontested fields
+    uncontested_context = []
+    all_fields = ['title', 'country', 'year', 'creator', 'doc_type', 'health_topic', 'language']
+    for field in all_fields:
+        if field not in discrepancies:
+            value = getattr(extracted_metadata, field, None)
+            if value and hasattr(value, 'value') and value.value:
+                uncontested_context.append(f"{field}: {value.value}")
     
-    Conflicts to resolve:
+    # Build contents list starting with PDF files, then the prompt
+    contents = []
+    
+    # Add PDF files first if available
+    if uploaded_files and uploaded_files[0]:  # first_pages_file, last_pages_file
+        first_pages_file, last_pages_file = uploaded_files[0], uploaded_files[1]
+        contents.append(first_pages_file)
+        if last_pages_file:
+            contents.append(last_pages_file)
+    
+    # Then add the analysis prompt
+    analysis_prompt = f"""
+    I need to resolve metadata conflicts for this health policy document.
+    {f"The document content is provided above for your direct examination." if uploaded_files and uploaded_files[0] else ""}
+    
+    The conflicting metadata values found are:
     {chr(10).join(conflict_summary)}
     
-    Please search for information about this document and resolve ALL conflicts. Consider:
+    {f"Uncontested metadata: {', '.join(uncontested_context)}" if uncontested_context else "No additional context available."}
+    
+    {"Please examine the document content AND search for authoritative information to resolve these conflicts." if uploaded_files and uploaded_files[0] else "Search for authoritative information to resolve these conflicts."}
+    Do not assume either the extracted or reference values are correct without verification.
+    
+    Consider:
     
     1. **Official Sources**: Government websites, institutional publications
     2. **Document Catalogs**: Library systems, policy databases  
@@ -1029,9 +1045,12 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
         print(f"🔍 Sending search grounding request to Gemini...")
         start_time = time.time()
         
+        # Add the prompt to contents list
+        contents.append(analysis_prompt)
+        
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[analysis_prompt],
+            contents=contents,
             config=types.GenerateContentConfig(
                 tools=[grounding_tool],  # Enable search grounding
                 temperature=0
@@ -1046,28 +1065,56 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
             print("✅ Search grounding request completed")
             print("\n📊 RAW RESPONSE")
             print("-"*50)
-            print(f"Response text: {response.text[:500]}..." if len(response.text) > 500 else f"Response text: {response.text}")
+            response_text = response.text or ''
+            print(f"Response text: {response_text[:500]}..." if len(response_text) > 500 else f"Response text: {response_text}")
             
-            # Check for grounding metadata
+            # Check for grounding metadata to verify if search was actually performed
+            search_performed = False
             if hasattr(response, 'candidates') and response.candidates:
                 candidate = response.candidates[0]
-                if hasattr(candidate, 'grounding_metadata'):
+                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
                     print("\n🔍 GROUNDING METADATA FOUND")
                     grounding_meta = candidate.grounding_metadata
+                    
+                    # Check search entry point (indicates search was attempted)
                     if hasattr(grounding_meta, 'search_entry_point') and grounding_meta.search_entry_point:
+                        search_performed = True
                         try:
                             # SearchEntryPoint might be an object, not a string
                             entry_str = str(grounding_meta.search_entry_point)
-                            print(f"Search entry point: {entry_str[:100]}...")
+                            print(f"🔍 Search entry point: {entry_str[:100]}...")
                         except:
-                            print("Search entry point: [Found but not displayable]")
+                            print("🔍 Search entry point: [Found but not displayable]")
+                    
+                    # Check grounding chunks (actual search results)
                     if hasattr(grounding_meta, 'grounding_chunks') and grounding_meta.grounding_chunks:
-                        print(f"Number of search results: {len(grounding_meta.grounding_chunks)}")
+                        chunks_count = len(grounding_meta.grounding_chunks)
+                        print(f"📄 Search results retrieved: {chunks_count} chunks")
+                        
+                        # Show details of first few chunks for debugging
+                        for i, chunk in enumerate(grounding_meta.grounding_chunks[:2]):  # Show first 2
+                            if hasattr(chunk, 'web') and chunk.web:
+                                web_info = chunk.web
+                                title = getattr(web_info, 'title', 'No title') or 'No title'
+                                uri = getattr(web_info, 'uri', 'No URI') or 'No URI'
+                                print(f"   [{i+1}] {title[:60]}... ({uri[:50]}...)")
+                    else:
+                        print("📄 No search results chunks found")
+                    
+                    # Overall search status
+                    if search_performed:
+                        print("✅ Google Search was performed")
+                    else:
+                        print("❌ Google Search was NOT performed (no search entry point)")
                 else:
-                    print("\n⚠️  No grounding metadata in response")
+                    print("\n⚠️  No grounding metadata in response - search likely not performed")
+                    search_performed = False
+            else:
+                print("\n⚠️  No candidates in response - search not performed")
+                search_performed = False
         
         # Try to extract JSON from the response text
-        response_text = response.text
+        response_text = response.text or ''
         
         # Look for JSON in markdown code blocks first
         import re
@@ -1101,24 +1148,26 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
             print("\n📋 PARSED SEARCH RESULTS")
             print("-"*50)
             print(f"Overall confidence: {result.get('overall_confidence', 'N/A')}")
-            print(f"Search evidence: {result.get('search_evidence', 'N/A')[:200]}..." if len(result.get('search_evidence', '')) > 200 else f"Search evidence: {result.get('search_evidence', 'N/A')}")
+            search_evidence = result.get('search_evidence', '') or ''
+            print(f"Search evidence: {search_evidence[:200]}..." if len(search_evidence) > 200 else f"Search evidence: {search_evidence}")
             print(f"Sources: {result.get('sources', [])}")
             
             resolutions = result.get('resolutions', {})
             print(f"\nField resolutions ({len(resolutions)}):")
             for field, resolution in resolutions.items():
                 print(f"  • {field}:")
-                print(f"    - Resolved value: {resolution.get('resolved_value', 'N/A')}")
+                print(f"    - Choice: {resolution.get('choice', 'N/A')}")
                 print(f"    - Confidence: {resolution.get('confidence', 'N/A')}")
-                print(f"    - Recommendation: {resolution.get('recommendation', 'N/A')}")
-                print(f"    - Reasoning: {resolution.get('reasoning', 'N/A')[:100]}..." if len(resolution.get('reasoning', '')) > 100 else f"    - Reasoning: {resolution.get('reasoning', 'N/A')}")
+                reasoning = resolution.get('reasoning', '') or ''
+                print(f"    - Reasoning: {reasoning[:100]}..." if len(reasoning) > 100 else f"    - Reasoning: {reasoning}")
         
         return result
         
     except json.JSONDecodeError as e:
         if verbose:
             print(f"\n❌ JSON PARSING ERROR: {e}")
-            print(f"Raw response: {response.text[:1000]}")
+            raw_response = response.text or ''
+            print(f"Raw response: {raw_response[:1000]}")
         return {
             "resolutions": {},
             "search_evidence": f"JSON parsing failed: {e}",
@@ -1136,7 +1185,7 @@ def query_gemini_with_search(discrepancies: dict, extracted_metadata, pdf_filena
         }
 
 def resolve_deviations_with_search(discrepancies: dict, pdf_filename: str, 
-                                  extracted_metadata, client, confidence_threshold: float = 0.8, verbose: bool = True) -> dict:
+                                  extracted_metadata, client, uploaded_files=None, confidence_threshold: float = 0.8, verbose: bool = True) -> dict:
     """Use ONE search to resolve ALL metadata conflicts for this document."""
     
     if not discrepancies:
@@ -1147,7 +1196,7 @@ def resolve_deviations_with_search(discrepancies: dict, pdf_filename: str,
     print(f"   Number of conflicts: {len(discrepancies)}")
     
     # Execute single search for all conflicts (Gemini auto-generates queries)
-    search_results = query_gemini_with_search(discrepancies, extracted_metadata, pdf_filename, client, verbose)
+    search_results = query_gemini_with_search(discrepancies, extracted_metadata, pdf_filename, client, uploaded_files, verbose)
     
     if verbose:
         print("\n📈 PROCESSING SEARCH RESOLUTIONS")
@@ -1658,10 +1707,13 @@ def process_pdf_with_validation(pdf_path: str, ground_truth: dict, api_key: str,
         print("Failed to prepare PDF subsets")
         return None
     
-    metadata = get_metadata_from_gemini(g_client, first_pages, last_pages, rate_limiter, max_retries)
-    if not metadata:
+    result = get_metadata_from_gemini(g_client, first_pages, last_pages, rate_limiter, max_retries)
+    if not result or len(result) != 3:
         print("Failed to extract metadata")
         return None
+    
+    metadata, uploaded_first, uploaded_last = result
+    uploaded_files = (uploaded_first, uploaded_last)
     
     # Compare with ground truth
     comparison_results = compare_with_ground_truth(metadata, ground_truth, pdf_path)
@@ -1678,7 +1730,7 @@ def process_pdf_with_validation(pdf_path: str, ground_truth: dict, api_key: str,
         discrepancies = comparison_results.get("discrepancies", {})
         if enable_search and discrepancies:
             search_resolution_results = resolve_deviations_with_search(
-                discrepancies, pdf_path, metadata, g_client, search_threshold
+                discrepancies, pdf_path, metadata, g_client, uploaded_files, search_threshold
             )
             
             if search_resolution_results["resolved"]:
@@ -1719,6 +1771,18 @@ def process_pdf_with_validation(pdf_path: str, ground_truth: dict, api_key: str,
     
     # Track deviations
     deviation_entry = track_all_deviations(comparison_results, pdf_path, metadata)
+    
+    # Clean up uploaded files in ALL cases (whether discrepancies found or not)
+    if uploaded_files and uploaded_files[0]:
+        try:
+            print(f"Deleting uploaded files from server...")
+            if uploaded_files[0]:  # first_pages_file
+                g_client.files.delete(name=uploaded_files[0].name)
+            if uploaded_files[1]:  # last_pages_file
+                g_client.files.delete(name=uploaded_files[1].name)
+            print("Files deleted.")
+        except Exception as cleanup_error:
+            logger.warning(f"Warning: Error during file cleanup: {cleanup_error}")
     
     return {
         'metadata': metadata,
@@ -2045,11 +2109,8 @@ class FileProducer(threading.Thread):
         except Exception as e:
             print(f"❌ [FileProducer] Error during file discovery: {e}")
         finally:
-            # Signal completion to workers (poison pills)
-            # We don't know how many workers there are, so we'll send plenty
-            for _ in range(50):  # Generous number to handle max workers
-                self.work_queue.put(None)
-            print(f"📁 [FileProducer] Sent shutdown signals to workers")
+            # Manager will handle shutdown signals after processing completes
+            print(f"📁 [FileProducer] Discovery complete; manager will handle worker shutdown")
     
     def _discover_pdfs_lazily(self):
         """Yield PDF files one at a time instead of loading all."""
@@ -2351,6 +2412,52 @@ def rolling_batch_process_pdfs(excel_path: str, docs_dir: str, api_key: str,
                         print(f"💾 Progress saved: {len(progress.completed)} completed, {len(progress.failed)} failed")
                     unsaved_changes = 0
                 
+                # Auto-scale workers upward based on current rate limit utilization
+                # Only scale up (no scale down) to keep shutdown simple
+                if auto_scale:
+                    # Initialize scaler timers on first iteration
+                    if 'last_scale_check' not in locals():
+                        last_scale_check = time.time()
+                        scale_interval = 15  # seconds
+                    # Periodic check
+                    if (time.time() - last_scale_check) >= scale_interval:
+                        try:
+                            # Only scale if there's backlog and remaining expected work
+                            backlog = work_queue.qsize()
+                            remaining = total_expected - results_processed
+                            current = len([w for w in workers_list if w.is_alive()])
+                            if backlog > current and remaining > 0:
+                                optimal = calculate_optimal_workers(GEMINI_RATE_LIMITER, base_workers=workers, max_workers=max_workers)
+                                if optimal > current:
+                                    # Respect backlog, remaining work, and max_workers
+                                    to_add = min(optimal - current, min(backlog, remaining), max_workers - current)
+                                    if to_add > 0:
+                                        print(f"📈 Auto-scaling: adding {to_add} workers (current={current}, backlog={backlog}, optimal={optimal}, max={max_workers})")
+                                        start_idx = len(workers_list)
+                                        for i in range(start_idx, start_idx + to_add):
+                                            worker = RollingWorker(
+                                                worker_id=i,
+                                                work_queue=work_queue,
+                                                results_queue=results_queue,
+                                                ground_truth=ground_truth,
+                                                api_key=api_key,
+                                                rate_limiter=GEMINI_RATE_LIMITER,
+                                                search_quota_tracker=SEARCH_QUOTA_TRACKER,
+                                                enable_search=enable_search,
+                                                search_threshold=search_threshold,
+                                                verbose=verbose,
+                                                max_retries=max_retries
+                                            )
+                                            worker.start()
+                                            workers_list.append(worker)
+                                            # Top-up poison pills for each new worker since producer has already joined
+                                            work_queue.put(None)
+                                        print(f"✅ Auto-scaling complete: now {len(workers_list)} workers")
+                        except Exception as e:
+                            print(f"⚠️ Auto-scaling check failed: {e}")
+                        finally:
+                            last_scale_check = time.time()
+                
                 # Show progress
                 if results_processed % 10 == 0:
                     elapsed = time.time() - start_time
@@ -2372,6 +2479,11 @@ def rolling_batch_process_pdfs(excel_path: str, docs_dir: str, api_key: str,
         # work_queue.join() can hang if workers died before marking tasks done
         print(f"✅ All workers have finished processing")
         
+        # Ensure enough shutdown signals for all alive workers before joining
+        alive_workers = [w for w in workers_list if w.is_alive()]
+        for _ in range(len(alive_workers)):
+            work_queue.put(None)
+
         # Wait for all workers to shutdown cleanly
         print(f"🛑 Waiting for workers to shut down...")
         for worker in workers_list:

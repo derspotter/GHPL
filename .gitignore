@@ -4,6 +4,12 @@
 *.log
 *.json
 
+# Ignore CSVs but keep results
+*.csv
+!meta_gpt5_results_20250810_190823 copy.csv
+!meta_gpt5_results_20250810_190823.csv
+!meta_gpt5_results_20250810_190823_repaired.csv
+
 # Ignore the docs directory with thousands of PDFs
 docs/
 docs_correct/

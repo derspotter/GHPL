@@ -1,7 +1,20 @@
 # PDF Metadata Extraction Enhancement Plan
 
+## Current Status (Updated 2025-08-07)
+
+### ✅ COMPLETED FEATURES
+- **Phase 1**: Internal PDF metadata extraction, "OTHER" enums, ground truth validation ✅
+- **Phase 2**: Full confidence scoring system, deviation tracking, enhanced CLI ✅  
+- **Phase 3**: Interactive resolution system, batch processing, search grounding ✅
+- **Rate limiting**: 140 RPM Gemini API + 1500/day search quota fully operational ✅
+
+### 🚀 NEXT HIGH-PRIORITY IMPROVEMENTS
+1. **Rolling Workers Architecture** - 25-40% performance improvement by eliminating batch stalls
+2. **JSON Parsing Retry Logic** - Smart error recovery to reduce failures from ~5-10% to <1%
+3. **Dynamic Worker Scaling** - Auto-scale workers based on rate limit utilization
+
 ## Overview
-This plan outlines improvements to make the PDF metadata extraction script more robust, accurate, and versatile. The enhancements focus on multiple validation layers, confidence scoring, and handling edge cases.
+This plan outlines improvements to make the PDF metadata extraction script more robust, accurate, and versatile. The system now features multiple validation layers, confidence scoring, interactive resolution, and comprehensive error handling.
 
 ## 1. Hybrid Approach: Leverage Built-in PDF Metadata
 
@@ -993,24 +1006,31 @@ response.candidates[0].grounding_chunks  # Citation information
 ## Implementation Priority
 
 1. **Phase 1 (High Impact, Low Effort)** ✅ COMPLETED
-   - Extract internal PDF metadata
-   - Add "OTHER" to enums
-   - Ground truth validation via Excel
+   - Extract internal PDF metadata ✅
+   - Add "OTHER" to enums ✅
+   - Ground truth validation via Excel ✅
 
 2. **Phase 2 (High Impact, Medium Effort)** ✅ COMPLETED
-   - Full confidence scoring system
-   - Ground truth validation and deviation tracking
-   - Enhanced CLI with validation reports
+   - Full confidence scoring system ✅
+   - Ground truth validation and deviation tracking ✅
+   - Enhanced CLI with validation reports ✅
+   - Rate limiting and throughput optimization ✅
 
-3. **Phase 3 (High Impact, Medium Effort)** 🔄 IN PROGRESS
-   - Interactive metadata resolution system
-   - User-corrected dataset building
-   - Batch processing options
+3. **Phase 3 (High Impact, Medium Effort)** ✅ COMPLETED 
+   - Interactive metadata resolution system ✅
+   - User-corrected dataset building ✅
+   - Batch processing options ✅
+   - Search grounding for conflict resolution ✅
 
-4. **Phase 4 (Medium Impact, High Effort)**
+4. **Phase 4 (High Impact, Medium Effort)** 🚀 NEXT PRIORITY
+   - Rolling workers architecture for 25-40% performance improvement
+   - JSON parsing retry logic with smart error recovery
+   - Dynamic worker scaling based on rate utilization
+
+5. **Phase 5 (Medium Impact, High Effort)**
    - Self-correction mechanism
-   - Web search validation (alternative to ground truth)
    - Multi-language support
+   - Advanced error recovery strategies
 
 ## Success Metrics
 
@@ -1038,44 +1058,30 @@ response.candidates[0].grounding_chunks  # Citation information
    - Multi-language documents
    - Very large files (>100 pages)
 
-## 8. Rate Limiting and Throughput Optimization 🚀 CRITICAL IMPLEMENTATION
+## 8. Rate Limiting and Throughput Optimization ✅ FULLY IMPLEMENTED
 
-### Current State Analysis ✅ PARTIALLY IMPLEMENTED
-- Rate limiting classes exist in cli.py (lines 41-161)
-- `RateLimiter` class: 140 RPM limit, thread-safe tracking
-- `SearchQuotaTracker` class: 1500/day search quota with persistence
-- **CRITICAL ISSUE**: Global limiters are declared but NEVER initialized 
-- **SYNCHRONIZATION PROBLEM**: get_metadata.py calls are not rate limited
+### Current State Analysis ✅ COMPLETED
+- Rate limiting classes implemented in cli.py (lines 324-437)
+- `RateLimiter` class: 140 RPM limit, thread-safe tracking ✅
+- `SearchQuotaTracker` class: 1500/day search quota with persistence ✅
+- **FIXED**: Global limiters are properly initialized in main() (lines 2206-2215) ✅
+- **WORKING**: Rate limiting is active for both metadata extraction and search ✅
 
-### Root Cause Analysis
+### Implementation Status ✅ COMPLETED
 ```python
-# In cli.py lines 152-154 - these are NEVER set to actual instances!
-GEMINI_RATE_LIMITER = None  # ⚠️ Always None
-SEARCH_QUOTA_TRACKER = None # ⚠️ Always None
-
-# In query_gemini_with_search() - tries to use None objects
-if GEMINI_RATE_LIMITER:  # This is always False!
-    wait_for_rate_limit(GEMINI_RATE_LIMITER, "search grounding")
+# In cli.py main() function - PROPERLY INITIALIZED
+global GEMINI_RATE_LIMITER, SEARCH_QUOTA_TRACKER
+GEMINI_RATE_LIMITER = RateLimiter(max_requests_per_minute=140)
+SEARCH_QUOTA_TRACKER = SearchQuotaTracker(max_searches_per_day=1500)
 ```
 
-### Implementation Plan
+### Current Implementation ✅ WORKING
 
-#### Step 1: Fix Global Limiter Initialization
-```python
-# In cli.py main() function - MUST be first thing after arg parsing
-def main():
-    # ... arg parsing ...
-    
-    # CRITICAL: Initialize rate limiters before ANY processing
-    global GEMINI_RATE_LIMITER, SEARCH_QUOTA_TRACKER
-    GEMINI_RATE_LIMITER = RateLimiter(max_requests_per_minute=140)  # Conservative
-    SEARCH_QUOTA_TRACKER = SearchQuotaTracker(max_searches_per_day=1500)
-    
-    print("🚀 Rate limiting initialized:")
-    print(f"   Gemini API: 140 RPM (150 - 10 buffer)")
-    quota_status = SEARCH_QUOTA_TRACKER.get_quota_status()
-    print(f"   Search quota: {quota_status['remaining']}/{quota_status['max']} remaining today")
-```
+The rate limiting system is fully operational with:
+- **140 RPM Gemini API limit** with 10 RPM safety buffer
+- **1500/day search quota** with persistent tracking across sessions  
+- **Thread-safe operation** for concurrent batch processing
+- **Real-time quota monitoring** and status reporting
 
 #### Step 2: Use Dependency Injection (Clean Architecture)
 ```python

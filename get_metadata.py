@@ -518,17 +518,9 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file, rate_lim
                 logger.info(f"Successfully extracted metadata after {retry} retries")
                 print(f"✅ Successfully extracted metadata after {retry} retries")
             
-            # Clean up uploaded files before returning successful result
-            try:
-                print(f"Deleting uploaded files from server...")
-                client.files.delete(name=first_pages_file.name)
-                if last_pages_file:
-                    client.files.delete(name=last_pages_file.name)
-                print("Files deleted.")
-            except Exception as cleanup_error:
-                logger.warning(f"Warning: Error during successful cleanup: {cleanup_error}")
-            
-            return metadata
+            # Don't delete files yet - they may be needed for search grounding
+            # Return both metadata and uploaded files for potential reuse
+            return metadata, first_pages_file, last_pages_file
             
         except Exception as e:
             error_msg = str(e)
@@ -545,6 +537,15 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file, rate_lim
             
             if not should_retry or retry >= max_retries:
                 print(f"❌ Failed after {retry + 1} attempts: {type(e).__name__}: {e}")
+                # Clean up files on failure
+                try:
+                    print(f"Deleting uploaded files from server...")
+                    client.files.delete(name=first_pages_file.name)
+                    if last_pages_file:
+                        client.files.delete(name=last_pages_file.name)
+                    print("Files deleted.")
+                except Exception as cleanup_error:
+                    logger.warning(f"Warning: Error during cleanup: {cleanup_error}")
                 return None
             
             print(f"⚠️ Attempt {retry + 1} failed: {e}")
@@ -559,7 +560,7 @@ def get_metadata_from_gemini(client, first_pages_file, last_pages_file, rate_lim
     except Exception as cleanup_error:
         logger.error(f"Error during file cleanup: {cleanup_error}")
     
-    return None
+    return None, None, None
 
 
 if __name__ == "__main__":
@@ -586,7 +587,19 @@ if __name__ == "__main__":
             first_pages, last_pages = prepare_and_upload_pdf_subset(g_client, PDF_FILE_PATH)
 
             if first_pages:
-                metadata = get_metadata_from_gemini(g_client, first_pages, last_pages)
+                result = get_metadata_from_gemini(g_client, first_pages, last_pages)
+
+                if result and len(result) == 3:
+                    metadata, uploaded_first, uploaded_last = result
+                    
+                    # Clean up uploaded files when done
+                    try:
+                        if uploaded_first:
+                            g_client.files.delete(name=uploaded_first.name)
+                        if uploaded_last:
+                            g_client.files.delete(name=uploaded_last.name)
+                    except Exception as e:
+                        print(f"Warning: Could not clean up uploaded files: {e}")
 
                 if metadata:
                     print("\n--- Extracted Metadata with Confidence Scores ---")
