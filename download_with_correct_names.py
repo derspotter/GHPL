@@ -67,10 +67,13 @@ def get_correct_filename_from_url(url):
 
 def fix_azure_url(url):
     """
-    Azure URL handling - URLs appear to be already properly encoded.
-    No additional encoding transformations needed.
+    Azure URL handling - Apply the %20 -> %2520 fix for Azure blob storage.
+    This converts %20 to %2520 because %25 is the encoding for %, 
+    so %2520 becomes %20 as a literal string matching actual uploaded filenames.
     """
-    return url
+    # Apply the Azure-specific fix: %20 -> %2520
+    fixed_url = url.replace('%20', '%2520')
+    return fixed_url
 
 def download_file_with_correct_name(row_data, folder, progress, thread_id=0):
     """

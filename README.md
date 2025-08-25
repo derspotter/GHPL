@@ -1,40 +1,45 @@
 # Global Health Policy Library (GHPL) - Metadata Extraction System
 
-An AI-powered system for extracting and validating structured metadata from health policy documents using Google's Gemini API with advanced search grounding capabilities.
+An AI-powered system for extracting and validating structured metadata from health policy PDFs using OpenAI's GPT-5-mini with advanced two-stage relevance assessment and metadata extraction.
 
 ## Features
 
-- **PDF Metadata Extraction**: Extracts structured metadata from health policy PDFs using Gemini 2.5 Pro
-- **Ground Truth Validation**: Compares extracted metadata against reference data
-- **Search Grounding**: Resolves metadata conflicts using Google Search to find authoritative sources
-- **Interactive Resolution**: User-friendly interface for resolving discrepancies
+- **Two-Stage Processing**: First assesses health policy relevance, then extracts detailed metadata
+- **PDF Metadata Extraction**: Uses GPT-5-mini with flex processing for cost-effective extraction
+- **Structured Output**: Pydantic-based schemas ensure consistent data format
 - **Confidence Scoring**: Each extracted field includes confidence scores and evidence
-- **Batch Processing**: Process multiple documents with comprehensive tracking
+- **Concurrent Batch Processing**: Multi-threaded processing with progress tracking
+- **Real-time CSV Export**: Results are written immediately during processing
+- **Cost Optimization**: Processes only first/last pages, uses flex pricing for 50% cost savings
 
 ## Key Components
 
-### 1. Metadata Extraction (`get_metadata.py`)
-- Uses Gemini 2.5 Pro for intelligent document analysis
-- Extracts: Document Type, Health Topic, Creator, Year, Country, Language, Title
-- Provides confidence scores and evidence for each field
-- Handles corrupted PDFs with automatic repair
+### 1. Main Processing Script (`meta_ghpl_gpt5.py`)
+- **Two-Stage Approach**: 
+  - Stage 1: Health policy relevance assessment with boolean questions
+  - Stage 2: Detailed metadata extraction using structured schemas
+- Uses GPT-5-mini with flex processing for optimal cost/performance
+- Extracts: Document Type, Health Focus, Title, Country, Year, Language, Authority, Governance Level
+- Real-time progress tracking and CSV export
+- Thread-safe concurrent processing with 80+ workers
 
-### 2. Validation System (`ground_truth_validation.py`)
-- Compares extractions against reference dataset (2659 documents)
-- Tracks all deviations for quality assessment
-- Calculates accuracy metrics and confidence scores
+### 2. PDF Processing
+- Extracts first 10 pages + last 5 pages for efficiency
+- Uses pikepdf for reliable PDF handling
+- Automatic file cleanup and memory management
+- Supports large-scale batch processing
 
-### 3. Search Grounding (`cli.py`)
-- Automatically resolves metadata conflicts using Google Search
-- Finds official sources to validate document information
-- Single search per document (optimized for API limits)
-- Confidence-based auto-resolution
+### 3. Structured Data Models (`meta.py`)
+- Pydantic schemas for consistent data validation
+- Enum-based fields for standardized values
+- Confidence scoring and evidence tracking
+- GHPL-compliant metadata structure
 
-### 4. Interactive CLI (`cli.py`)
-- User-friendly command-line interface
-- Interactive or automated conflict resolution
-- Export capabilities for analysis
-- Comprehensive reporting
+### 4. Rate Limiting and Optimization (`utils.py`)
+- OpenAI API rate limiting (500 RPM, 200K TPM)
+- Exponential backoff retry logic with tenacity
+- Cost tracking and performance metrics
+- Flexible vs standard processing options
 
 ## Installation
 
@@ -55,37 +60,47 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Set up Gemini API key:
+4. Set up OpenAI API key:
 ```bash
 # Option 1: Environment variable
-export GOOGLE_API_KEY="your-api-key-here"
+export OPENAI_API_KEY="your-api-key-here"
 
 # Option 2: Create .env file in project root
-echo "GOOGLE_API_KEY=your-api-key-here" > .env
+echo "OPENAI_API_KEY=your-api-key-here" > .env
 
-# Get API key from: https://aistudio.google.com/
+# Get API key from: https://platform.openai.com/
 ```
 
 ## Usage
 
-### Basic Extraction with Validation
+### Single File Processing
 ```bash
-python cli.py path/to/document.pdf
+# Process a single PDF with GPT-5-mini
+python meta_ghpl_gpt5.py path/to/document.pdf
+
+# Use standard processing (faster but 2x cost)
+python meta_ghpl_gpt5.py document.pdf --no-flex
 ```
 
-### With Search Grounding (Auto-resolve conflicts)
+### Batch Processing
 ```bash
-python cli.py document.pdf --auto-resolve
+# Process all PDFs in a directory with 80 workers
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 80
+
+# Process with limit for testing
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 4 --limit 10
+
+# Resume interrupted batch processing (auto-detects existing CSV)
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 80
 ```
 
-### Interactive Resolution
+### Performance Optimization
 ```bash
-python cli.py document.pdf --interactive
-```
+# High-throughput processing for production
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 100
 
-### Export Analysis
-```bash
-python cli.py document.pdf --export-deviations analysis.xlsx
+# Conservative processing to avoid rate limits
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 20
 ```
 
 ### Document Management
@@ -125,61 +140,60 @@ python test_ground_truth_matching.py
 python get_metadata.py path/to/sample.pdf
 ```
 
-## Complete Command-Line Reference
+## Command-Line Reference (meta_ghpl_gpt5.py)
 
-### Single File Processing Options
-- `pdf_path`: Path to PDF file to process
-- `--excel`: Path to reference Excel file (default: documents-info.xlsx)
-- `--api-key`: Gemini API key (defaults to GOOGLE_API_KEY env var)
-- `--export-deviations`: Export deviations analysis to Excel file
-- `--stats-only`: Only show ground truth validation statistics
-- `--verbose`: Enable detailed output for debugging
+### Core Arguments
+- `pdf_path`: Path to single PDF file to process (optional if using --docs-dir)
+- `--docs-dir`: Directory containing PDF files for batch processing
+- `--workers`: Number of concurrent workers (default: 80, optimized for 500 RPM limit)
+- `--no-flex`: Disable flex processing (costs 2x more but may be faster)
+- `--limit`: Maximum number of files to process (useful for testing)
 
-### Resolution and Processing Modes
-- `--interactive`: Enable interactive resolution of metadata discrepancies
-- `--auto-reference`: Automatically use reference values for all conflicts
-- `--auto-extracted`: Automatically use extracted values for all conflicts
-- `--auto-resolve`: Enable automatic search resolution of conflicts
-- `--with-search`: Use search grounding with interactive mode
-- `--search-threshold`: Minimum confidence for auto-resolution (default: 0.8)
+### Output and Results
+- Results are automatically saved to timestamped CSV files: `meta_gpt5_results_YYYYMMDD_HHMMSS.csv`
+- CSV includes both relevance assessment and metadata extraction results
+- Processing resumes automatically if existing CSV is found
+- Real-time progress tracking and cost calculation
 
-### Export and Logging Options
-- `--export-corrections`: Export user corrections to Excel file
-- `--export-unresolved`: Export unresolved items to Excel file
-- `--log-decisions`: Log all user decisions to JSON file
+### Example Commands
+```bash
+# Test with small batch
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 4 --limit 5
 
-### Batch Processing Options
-- `--batch`: Enable batch processing mode
-- `--docs-dir`: Directory containing PDF files (default: docs)
-- `--workers`: Number of concurrent workers (default: 4)
-- `--batch-size`: Process files in batches of this size (default: 50)
-- `--resume`: Resume batch processing from last checkpoint
-- `--retry-failed`: Retry only failed files from previous batch
-- `--progress-file`: Progress tracking file (default: batch_progress.json)
-- `--limit`: Limit number of files to process (useful for testing)
-- `--max-retries`: Maximum retries for failed operations (default: 3)
+# Production batch processing
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 80
 
-### Batch Export Options
-- `--batch-results`: Export all batch results to Excel file
-- `--batch-deviations`: Export batch deviations to Excel file
-- `--batch-ground-truth`: Export updated ground truth to Excel file
+# Single file with standard processing
+python meta_ghpl_gpt5.py sample.pdf --no-flex
 
-## Data Schema
+# Resume interrupted processing
+python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 80
+```
 
-### Document Types
+## Data Schema and Output Structure
+
+### Two-Stage Assessment
+**Stage 1: Relevance Assessment**
+- `is_health_policy_related`: Boolean (from authoritative health source?)
+- `fits_ghpl_categories`: Boolean (fits into 6 GHPL document types?)
+- Confidence scores and explanations for each assessment
+
+**Stage 2: Metadata Extraction** (only if both Stage 1 assessments are TRUE)
+
+### Document Types (Enum)
 - Policy
-- Law
+- Law  
 - National Health Strategy
 - National Control Plan
 - Action Plan
 - Health Guideline
 
-### Health Topics
+### Health Focus Areas (Enum)
 - Cancer
 - Cardiovascular Health
 - Non-Communicable Disease
 
-### Creators
+### Issuing Authorities (Enum)
 - Parliament
 - Ministry
 - Agency
@@ -187,11 +201,23 @@ python get_metadata.py path/to/sample.pdf
 - Association
 - Society
 
+### Governance Levels (Enum)
+- National
+- Regional 
+- International
+
+### CSV Output Columns
+- Relevance assessment (Q1A, Q1B with confidence/explanations)
+- Metadata fields (title, doc_type, health_topic, creator, year, country, language, governance_level)
+- Quality metrics (overall_confidence, metadata_completeness)
+- Processing statistics (processing_time, API cost, error messages)
+
 ## Requirements
 
 - Python 3.8+
-- Gemini API key (get from [Google AI Studio](https://aistudio.google.com/))
+- OpenAI API key (get from [OpenAI Platform](https://platform.openai.com/))
 - 8GB+ RAM recommended for processing large PDFs
+- GPT-5-mini access (currently in limited preview)
 
 ## Complete Project Structure
 
@@ -199,57 +225,51 @@ python get_metadata.py path/to/sample.pdf
 /home/jay/GHPL/
 ├── 📁 docs/                        # Downloaded PDFs (2400+ files, may have URL parsing issues)
 ├── 📁 docs_correct/                # Curated PDFs with verified filenames (2452 files, 92.2% match rate)
-├── 🐍 cli.py                       # Main CLI application (2299 lines)
-├── 🐍 get_metadata.py              # Core metadata extraction using Gemini 2.5 Pro
-├── 🐍 ground_truth_validation.py   # Ground truth comparison and validation
+├── 🐍 meta_ghpl_gpt5.py            # ⭐ MAIN SCRIPT: GPT-5-mini two-stage processing (1428 lines)
+├── 🐍 meta.py                      # Pydantic schemas and data models for structured output
+├── 🐍 utils.py                     # Rate limiting and utility functions
+├── 🐍 cli.py                       # Legacy CLI with Gemini API (deprecated)
+├── 🐍 get_metadata.py              # Legacy metadata extraction (deprecated)
 ├── 🐍 check_single_folder.py       # Filename matching analysis tool
 ├── 🐍 find_unmatched_files.py      # Find files not matching Excel entries
 ├── 🐍 download_with_correct_names.py # Smart downloader with proper URL parsing
 ├── 🐍 dedupe_and_convert.py        # Document deduplication and format conversion
 ├── 🐍 url_corrector.py             # URL correction and validation utilities
 ├── 🐍 examine_excel.py             # Excel structure and content analysis
-├── 🐍 test_ground_truth_matching.py # Ground truth validation testing
-├── 🐍 check_filename_matching.py   # Filename matching logic validation
 ├── 📊 documents-info.xlsx          # Ground truth metadata (2659 documents)
-├── 🗂️ batch_progress.json          # Batch processing state (resumable)
-├── 🗂️ search_quota.json           # Daily search API quota tracking (1.5k/day)
-├── 🗂️ folder_analysis_*.json       # Folder analysis reports from check_single_folder.py
+├── 📊 meta_gpt5_results_*.csv      # Output CSV files with timestamped results
 ├── 📋 requirements.txt             # Python dependencies
 ├── 📖 CLAUDE.md                    # Comprehensive development instructions
-├── 📖 plan.md                      # Feature roadmap and enhancement plans
-├── 📖 USAGE_DEDUPE.md             # Document deduplication usage guide
 ├── 📖 README.md                   # This file - project overview and usage
-└── 🔧 .env                        # API keys (create manually: GOOGLE_API_KEY=your-key)
+└── 🔧 .env                        # API keys (create manually: OPENAI_API_KEY=your-key)
 ```
 
 ## Key Python Scripts Documentation
 
 ### Core Processing Scripts
 
-**`cli.py` (2299 lines) - Main CLI Application**
-- Comprehensive command-line interface with 25+ arguments
-- Single file and batch processing modes
-- Interactive and automatic conflict resolution
-- Search grounding with Google Search integration
-- Thread-safe batch processing with progress tracking
-- Excel export capabilities for results and analysis
-- Advanced error categorization and retry logic
-- Rate limiting and quota management
+**`meta_ghpl_gpt5.py` (1428 lines) - ⭐ MAIN PROCESSING SCRIPT**
+- **Two-Stage Processing Pipeline**: 
+  - Stage 1: Health policy relevance assessment (boolean questions A & B)
+  - Stage 2: Detailed metadata extraction with structured schemas
+- **GPT-5-mini Integration**: Uses OpenAI Responses API with flex processing
+- **Concurrent Processing**: Thread-safe batch processing with 80+ workers
+- **Real-time CSV Export**: Results written immediately during processing
+- **Cost Optimization**: Processes only first 10 + last 5 pages, uses flex pricing
+- **Automatic Resume**: Detects existing CSV files and resumes processing
+- **Performance Metrics**: Tracks processing time, API costs, and throughput
 
-**`get_metadata.py` - Metadata Extraction Engine**
-- Gemini 2.5 Pro integration with structured output (Pydantic schemas)
-- Extracts: document type, health topic, creator, level, title, country, language, year
-- Confidence scoring and evidence tracking for each field
-- PDF page optimization (first 3 + last 2 pages only)
-- Automatic PDF repair with qpdf for corrupted files
-- Comprehensive error handling and logging
+**`meta.py` - Structured Data Models**
+- **Pydantic Schemas**: RelevanceAssessment and GHPLDocumentMetadata classes
+- **Enum Validation**: Standardized values for document types, health topics, etc.
+- **Confidence Scoring**: Built-in confidence calculation and completeness metrics
+- **GHPL Compliance**: Follows Global Health Policy Library standards
 
-**`ground_truth_validation.py` - Validation System**
-- Loads and compares against reference data (documents-info.xlsx)
-- Tracks ALL deviations for quality assessment
-- Adjusts confidence scores based on ground truth matches
-- Supports different validation modes and thresholds
-- Generates detailed comparison reports
+**`utils.py` - Rate Limiting and Utilities**
+- **OpenAI Rate Limiting**: 500 RPM, 200K TPM limits with intelligent backoff
+- **Retry Logic**: Tenacity-based exponential backoff for API failures
+- **Performance Tracking**: Token usage monitoring and cost calculation
+- **Thread Safety**: Concurrent processing utilities
 
 ### Analysis and Quality Assurance
 
@@ -310,23 +330,30 @@ python get_metadata.py path/to/sample.pdf
 
 ## API Rate Limits and Optimization
 
-### Gemini API Limits
-- Model: `gemini-2.5-pro`
-- Rate limiting: Built-in exponential backoff and retry logic
-- Concurrent workers: Automatically optimized based on rate limits
-- Token optimization: Only first 3 + last 2 pages sent to reduce costs
+### OpenAI GPT-5-mini Limits
+- Model: `gpt-5-mini` (currently in limited preview)
+- Rate limiting: 500 requests per minute, 200K tokens per minute
+- Built-in retry logic with exponential backoff using tenacity
+- Flex processing: 50% cost reduction compared to standard processing
 
-### Search Grounding Limits
-- Daily quota: 1.5k searches/day on tier 1 billing
-- Optimization: ONE comprehensive search per document (not per field)
-- Quota tracking: Automatic daily reset in `search_quota.json`
-- Fallback: Interactive resolution when quota exceeded
+### Cost Optimization
+- **Flex Processing**: Default mode for 2x cost savings (slower but much cheaper)
+- **PDF Subset**: Only processes first 10 + last 5 pages to reduce token usage
+- **Structured Output**: Uses Responses API for reliable JSON parsing
+- **Batch Processing**: Concurrent workers optimize throughput
 
 ### Performance Recommendations
-- Use `docs_correct/` folder for batch processing (100% filename matching)
-- Start with `--limit 10 --verbose` for testing
-- Use `--workers 2-4` to avoid rate limiting
-- Monitor `cli_errors.log` for API issues
+- Use `docs_correct/` folder for batch processing (92.2% filename matching)
+- Start with `--limit 5 --workers 4` for testing
+- Production: `--workers 80` for optimal throughput under rate limits
+- Monitor CSV output for real-time progress and cost tracking
+- Use `--no-flex` only if speed is more important than cost
+
+### Scaling Guidelines
+- For 500 RPM limit: Use up to 80-100 workers
+- Processing rate: ~1-3 documents per minute per worker
+- Cost: ~$0.01-0.05 per document with flex processing
+- Throughput: 50-150 documents per minute with 80 workers
 
 ## Development
 
