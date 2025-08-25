@@ -271,55 +271,70 @@ def process_document_with_chat(client, first_pages_file, last_pages_file, pdf_pa
         I need you to answer two separate boolean questions about this document:
 
         **Question A: Is this document from an authoritative health source?**
-        - TRUE if from: Government agencies, ministries, parliaments, WHO, UN agencies, national public health institutes, official health authorities, professional medical societies/associations that set standards
-        - FALSE if from: Commercial companies, individual hospitals/clinics, pure academic institutions without policy mandate, news outlets, blogs, individual authors
+        - TRUE if from: Government agencies, ministries, parliaments, national public health institutes, official health authorities, professional medical societies/associations that set standards
+        - FALSE if from:  WHO, UN agencies, Commercial companies, individual hospitals/clinics, pure academic institutions without policy mandate, news outlets, blogs, individual authors
         - Edge cases: NGOs/foundations can be TRUE if they work closely with government or have quasi-official status
 
         **Question B: Does it fit into one of the 6 GHPL document categories?**
         
-        Look for these SPECIFIC document types and characteristics:
+        ⚠️ **IMPORTANT**: The document title/filename is NOT a definitive indicator of document type. Focus on the actual content, structure, and purpose of the document, not just its name.
         
-        1. **POLICY**: A formal statement that:
+        Look for these SPECIFIC document types and characteristics based on the official GHPL Glossary:
+        
+        1. **POLICY**: A formal, high-level statement by a government body that:
            - Defines goals, priorities, and parameters for action
+           - Establishes principles to guide decisions
            - Sets a vision for the future
-           - Outlines priorities and stakeholder roles
-           - Examples: "National Policy on...", "Policy Framework for...", strategic policy documents
-           - NOT: Research papers discussing policy, announcements about policies, policy briefs
+           - Outlines priorities and the general roles of different stakeholders
+           - **Synonyms**: Policy framework, policy statement, strategic policy document
+           - **Examples**: "National Policy on...", "Policy Framework for...", "Health Policy..."
+           - **NOT**: Research papers discussing policy, announcements about policies, policy briefs, implementation plans
+           - **This document type should only be considered, when none of the others seems fitting**
         
         2. **LAW**: Legal instruments that:
-           - Create binding rules or regulations
+           - Create binding rules or regulations with legal force
            - Are acts, statutes, decrees, regulations, bylaws, or legal codes
-           - Have legal force and penalties
-           - Examples: "Public Health Act", "Tobacco Control Regulations", "Health Insurance Law"
-           - NOT: Explanations of laws, legal analysis papers
+           - Have enforcement mechanisms and penalties
+           - Are passed by legislative bodies or authorized agencies
+           - **Synonyms**: Act, statute, decree, regulation, bylaw, legal code, ordinance
+           - **Examples**: "Public Health Act", "Tobacco Control Regulations", "Health Insurance Law"
+           - **NOT**: Explanations of laws, legal analysis papers, draft legislation
         
-        3. **NATIONAL HEALTH STRATEGY**: Comprehensive documents that:
-           - Provide a model for the entire health sector
-           - Cover broad, long-term lines of action
-           - Address the whole health system or major components
-           - Examples: "National Health Strategic Plan 2020-2025", "Vision 2030 Health Strategy"
-           - NOT: Narrow topic strategies, research agendas without implementation
+        3. **NATIONAL HEALTH STRATEGY**: Comprehensive strategic documents that:
+           - Provide a model for the entire health sector of a country
+           - Cover broad, long-term strategic lines of action
+           - Address the whole health system or major components thereof
+           - Set overarching goals and strategic directions
+           - **Synonyms**: Health strategic plan, national health plan, health sector strategy
+           - **Examples**: "National Health Strategic Plan 2020-2025", "Vision 2030 Health Strategy"
+           - **NOT**: Disease-specific strategies, narrow topic strategies, research agendas without implementation
         
         4. **NATIONAL CONTROL PLAN**: Strategic plans that:
-           - Focus on controlling a specific disease or health problem
+           - Focus on controlling a specific disease or health problem at national/regional level
            - Have clear goals, targets, and implementation strategies
-           - Are at national/regional level
-           - Examples: "National Cancer Control Programme", "National HIV/AIDS Strategic Plan", "Malaria Elimination Strategy"
-           - NOT: Clinical studies, disease surveillance reports without strategy
+           - Include specific interventions and resource allocation
+           - Are developed for disease control or health problem management
+           - **Synonyms**: Control program, strategic plan for [disease], elimination plan, prevention plan
+           - **Examples**: "National Cancer Control Programme", "National HIV/AIDS Strategic Plan", "Malaria Elimination Strategy"
+           - **NOT**: Clinical studies, disease surveillance reports without strategy, research protocols
         
-        5. **ACTION PLAN**: Implementation documents that:
-           - Outline specific steps to implement a policy
-           - Include timelines, responsibilities, and resource allocation
-           - Have concrete, measurable actions
-           - Examples: "Implementation Plan for...", "Operational Plan", "Action Plan for..."
-           - NOT: Project proposals, work plans for specific organizations
+        5. **ACTION PLAN**: Implementation-focused documents that:
+           - Outline specific steps and activities to implement a higher-level policy or strategy
+           - Include detailed timelines, responsibilities, and resource allocation
+           - Have concrete, measurable actions and deliverables
+           - Serve as operational blueprints for implementation
+           - **Synonyms**: Implementation plan, operational plan, work plan, execution plan
+           - **Examples**: "Implementation Plan for...", "Operational Plan", "Action Plan for..."
+           - **NOT**: High-level strategies, project proposals, organizational work plans
         
         6. **GUIDELINE**: Evidence-based documents that:
            - Provide formal advisory statements for health interventions
-           - Guide clinical or public health practice
-           - Are systematically developed with evidence review
-           - Examples: "Clinical Practice Guidelines", "Standard Treatment Guidelines", "Public Health Guidelines", "Standard Operating Procedures"
-           - NOT: Patient education materials, training manuals, fact sheets, FAQs
+           - Guide clinical practice or public health practice
+           - Are systematically developed with evidence review processes
+           - Offer recommendations based on scientific evidence
+           - **Synonyms**: Clinical guidelines, practice guidelines, standard treatment guidelines, clinical protocols, standard operating procedures
+           - **Examples**: "Clinical Practice Guidelines", "Standard Treatment Guidelines", "WHO Guidelines"
+           - **NOT**: Patient education materials, training manuals, fact sheets, FAQs, informal guidance
 
         **CRITICAL: Documents that do NOT qualify:**
         - Pure data reports/briefs (even from CDC/government) without policy content
@@ -526,14 +541,9 @@ def process_document_with_chat(client, first_pages_file, last_pages_file, pdf_pa
         print(f"\n❓ {pdf_filename}: Question 2: Extracting detailed metadata...")
         
         question_2 = f"""
-        Please extract detailed metadata using the proper enum-based structure.
+        Great! Since this document is health policy related and fits GHPL categories, please extract detailed metadata using the proper enum-based structure.
 
-        📄 **Document Analysis Context**: 
-        - Filename: {pdf_filename}
-        - First uploaded file (ID: {first_pages_file.id}): Contains the first 10 pages of the PDF
-        {'- Second uploaded file (ID: ' + last_pages_file.id + '): Contains the last 5 pages of the PDF' if last_pages_file else ''}
-        
-        Please analyze these uploaded PDF file(s) to extract the following metadata. For each metadata field, provide the appropriate field type with:
+        For each metadata field, provide the appropriate field type with:
         1. **value**: The extracted information (or null if not found)
         2. **confidence**: A score from 0.0 to 1.0 based on:
            - 1.0: Explicitly stated with clear labeling (e.g., "Title: [value]")
@@ -555,6 +565,64 @@ def process_document_with_chat(client, first_pages_file, last_pages_file, pdf_pa
         - "National Control Plan"
         - "Action Plan"
         - "Health Guideline"
+        
+        ⚠️ **CRITICAL**: The document title/filename is NOT a definitive indicator of document type. You must analyze the actual content, structure, and purpose of the document, not just its name. A document called "Policy" might actually be a guideline, and a document called "Guidelines" might actually be a policy.
+        
+        **DETAILED DEFINITIONS FOR doc_type (from official GHPL Glossary):**
+        
+        1. **POLICY**: A formal, high-level statement by a government body that:
+           - Defines goals, priorities, and parameters for action
+           - Establishes principles to guide decisions
+           - Sets a vision for the future
+           - Outlines priorities and the general roles of different stakeholders
+           - **Synonyms**: Policy framework, policy statement, strategic policy document
+           - **Examples**: "National Policy on...", "Policy Framework for...", "Health Policy..."
+           - **NOT**: Research papers discussing policy, announcements about policies, policy briefs, implementation plans
+
+        2. **LAW**: Legal instruments that:
+           - Create binding rules or regulations with legal force
+           - Are acts, statutes, decrees, regulations, bylaws, or legal codes
+           - Have enforcement mechanisms and penalties
+           - Are passed by legislative bodies or authorized agencies
+           - **Synonyms**: Act, statute, decree, regulation, bylaw, legal code, ordinance
+           - **Examples**: "Public Health Act", "Tobacco Control Regulations", "Health Insurance Law"
+           - **NOT**: Explanations of laws, legal analysis papers, draft legislation
+
+        3. **NATIONAL HEALTH STRATEGY**: Comprehensive strategic documents that:
+           - Provide a model for the entire health sector of a country
+           - Cover broad, long-term strategic lines of action
+           - Address the whole health system or major components thereof
+           - Set overarching goals and strategic directions
+           - **Synonyms**: Health strategic plan, national health plan, health sector strategy
+           - **Examples**: "National Health Strategic Plan 2020-2025", "Vision 2030 Health Strategy"
+           - **NOT**: Disease-specific strategies, narrow topic strategies, research agendas without implementation
+
+        4. **NATIONAL CONTROL PLAN**: Strategic plans that:
+           - Focus on controlling a specific disease or health problem at national/regional level
+           - Have clear goals, targets, and implementation strategies
+           - Include specific interventions and resource allocation
+           - Are developed for disease control or health problem management
+           - **Synonyms**: Control program, strategic plan for [disease], elimination plan, prevention plan
+           - **Examples**: "National Cancer Control Programme", "National HIV/AIDS Strategic Plan", "Malaria Elimination Strategy"
+           - **NOT**: Clinical studies, disease surveillance reports without strategy, research protocols
+
+        5. **ACTION PLAN**: Implementation-focused documents that:
+           - Outline specific steps and activities to implement a higher-level policy or strategy
+           - Include detailed timelines, responsibilities, and resource allocation
+           - Have concrete, measurable actions and deliverables
+           - Serve as operational blueprints for implementation
+           - **Synonyms**: Implementation plan, operational plan, work plan, execution plan
+           - **Examples**: "Implementation Plan for...", "Operational Plan", "Action Plan for..."
+           - **NOT**: High-level strategies, project proposals, organizational work plans
+
+        6. **HEALTH GUIDELINE**: Evidence-based documents that:
+           - Provide formal advisory statements for health interventions
+           - Guide clinical practice or public health practice
+           - Are systematically developed with evidence review processes
+           - Offer recommendations based on scientific evidence
+           - **Synonyms**: Clinical guidelines, practice guidelines, standard treatment guidelines, clinical protocols, standard operating procedures
+           - **Examples**: "Clinical Practice Guidelines", "Standard Treatment Guidelines", "WHO Guidelines"
+           - **NOT**: Patient education materials, training manuals, fact sheets, FAQs, informal guidance
         
         **health_topic** MUST be EXACTLY one of these values (no other values allowed):
         - "Cancer": for cancer-related documents (oncology, cancer screening, cancer treatment)
@@ -578,6 +646,40 @@ def process_document_with_chat(client, first_pages_file, last_pages_file, pdf_pa
         - **National**: UK Parliament law, US Federal policy, German Bundestag policy
         - **Regional**: Welsh Government policy, Scottish Government policy, California state policy, Ontario provincial policy
         - **International**: WHO guidelines, EU directives, UN conventions, NAACCR standards (North America), PAHO policies (Americas)
+        
+        **CRITICAL: Documents that do NOT qualify:**
+        - Pure data reports/briefs (even from CDC/government) without policy content
+        - Research papers/editorials/commentaries (even if discussing policy)
+        - Educational materials/brochures for patients or public
+        - Assessment/evaluation reports (unless they contain the actual policy/strategy)
+        - Meeting reports, conference proceedings, presentations
+        - Newsletters, bulletins, announcements
+        - Product information, technical specifications
+        - Training materials, toolkits, frameworks (unless official guidelines)
+        - FAQs, fact sheets, information sheets
+        
+        **Real examples of documents that should be REJECTED:**
+        - "Data Brief No. 50" → Statistical report, not policy
+        - "Guest Editorial" in journal → Commentary, not policy
+        - "Blood pressure brochure" → Patient education, not guideline
+        - "FAQ on Delta-8 THC" → Information sheet, not policy
+        - "Institutional Capacity Assessment" → Assessment report, not the strategy itself
+        - "CovidConnect slides" → Presentation, not official document
+        
+        **Real examples of documents that should be ACCEPTED:**
+        - "Rwanda National Cancer Control Plan" → National Control Plan
+        - "Guidelines for the Use of Antiretroviral Agents" → Guideline
+        - "Cardiovascular Disease Outcomes Strategy" → National Control Plan
+        - "National Technical Guidelines for Integrated Disease Surveillance" → Guideline
+        - "Kenya National Strategy for NCDs" → National Control Plan
+
+        **Look for these positive indicators:**
+        - Official seal, logo, or letterhead from government/authority
+        - Formal approval statement or ministerial foreword
+        - Version control, official reference numbers
+        - Clear effective dates or implementation timelines
+        - Structured format typical of official documents
+        - Legal or regulatory language
         
         If you cannot determine which enum value applies, set the value to null rather than guessing or creating new values.
         
@@ -1149,7 +1251,7 @@ def export_results_to_csv(results: List[Dict[str, Any]], output_path: str) -> No
     print(f"✅ CSV export complete: {len(csv_rows)} rows written to {output_path}")
 
 
-def batch_process_documents(docs_dir: str, api_key: str, workers: int = 80, limit: Optional[int] = None, use_flex: bool = True):
+def batch_process_documents(docs_dir: str, api_key: str, workers: int = 80, limit: Optional[int] = None, use_flex: bool = True, fresh_start: bool = False):
     """Process multiple documents using flex processing with OpenAI GPT-5-mini."""
     print(f"🚀 Starting batch processing with {workers} workers (flex processing)")
     print(f"📁 Directory: {docs_dir}")
@@ -1164,11 +1266,11 @@ def batch_process_documents(docs_dir: str, api_key: str, workers: int = 80, limi
         print(f"❌ No PDF files found in {docs_dir}")
         return
     
-    # Check for existing CSV to resume from
+    # Check for existing CSV to resume from (unless fresh start requested)
     existing_csvs = glob.glob("meta_gpt5_results_*.csv")
     processed_files = set()
     
-    if existing_csvs:
+    if existing_csvs and not fresh_start:
         # Find the most recent CSV file
         csv_filename = max(existing_csvs, key=os.path.getctime)
         print(f"📄 Found existing CSV: {csv_filename}")
@@ -1201,6 +1303,8 @@ def batch_process_documents(docs_dir: str, api_key: str, workers: int = 80, limi
         # Create new timestamped filename
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_filename = f"meta_gpt5_results_{timestamp}.csv"
+        if fresh_start and existing_csvs:
+            print(f"🔄 Fresh start requested - ignoring {len(existing_csvs)} existing CSV files")
         print(f"📄 Starting new CSV: {csv_filename}")
     
     # Apply limit if specified (after resume filtering)
@@ -1305,6 +1409,7 @@ def main():
     parser.add_argument('--workers', type=int, default=80, help='Number of concurrent workers (default: 80 for 500 RPM limit)')
     parser.add_argument('--no-flex', action='store_true', help='Disable flex processing (costs more, may be faster)')
     parser.add_argument('--limit', type=int, help='Maximum number of files to process (for testing)')
+    parser.add_argument('--fresh-start', action='store_true', help='Start fresh run, ignore existing CSV files')
     
     args = parser.parse_args()
     
@@ -1328,7 +1433,7 @@ def main():
         if args.limit:
             print(f"📊 Limit: {args.limit} files")
         
-        batch_process_documents(args.docs_dir, API_KEY, args.workers, args.limit, use_flex=not args.no_flex)
+        batch_process_documents(args.docs_dir, API_KEY, args.workers, args.limit, use_flex=not args.no_flex, fresh_start=args.fresh_start)
         return
     
     # Single file processing mode
