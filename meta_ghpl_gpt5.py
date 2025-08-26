@@ -29,12 +29,7 @@ from tenacity import (
 # Import rate limiting utilities (may not be needed with flex processing)
 from utils import RateLimiter, wait_for_rate_limit
 
-# Load environment variables (optional - dotenv not required)
-try:
-    from dotenv import load_dotenv
-    load_dotenv(override=True)  # Override existing env vars with .env values
-except ImportError:
-    pass  # dotenv is optional
+# Environment variables are loaded from shell (bashrc)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1075,26 +1070,65 @@ def append_result_to_csv(result: Dict[str, Any], csv_filename: str) -> None:
     # Extract metadata if available (using same logic as export_results_to_csv)
     metadata = result.get('metadata')
     if metadata:
-        # Helper function to safely extract field values
-        def extract_field_value(field):
-            if field and hasattr(field, 'value'):
-                if hasattr(field.value, 'value'):  # Enum field
-                    return field.value.value
-                return field.value
+        # Helpers: robustly access metadata fields regardless of object/dict and alt names
+        def get_meta_field(meta_obj, *names):
+            """Try attribute, then dict key, for a list of candidate names."""
+            for name in names:
+                # Attribute access (Pydantic BaseModel)
+                if hasattr(meta_obj, name):
+                    val = getattr(meta_obj, name)
+                    if val is not None:
+                        return val
+                # Dict-like access
+                if isinstance(meta_obj, dict) and name in meta_obj and meta_obj[name] is not None:
+                    return meta_obj[name]
+            return None
+
+        def extract_field_value(field, field_name: str = ""):
+            """Return underlying value for nested field objects, enums, or dicts."""
+            # Debug for the problematic fields
+            if field_name in ['doc_type', 'health_topic', 'creator']:
+                try:
+                    hv = hasattr(field, 'value') if field is not None else False
+                    print(f"DEBUG {field_name}: field_type={type(field)}, has_value_attr={hv}")
+                    if hv:
+                        print(f"DEBUG {field_name}: nested_value_type={type(getattr(field, 'value', None))}")
+                except Exception:
+                    pass
+
+            # Handle Pydantic-style nested field with .value
+            if field is not None and hasattr(field, 'value'):
+                inner = getattr(field, 'value')
+                # Enum with .value
+                if hasattr(inner, 'value'):
+                    return inner.value
+                return inner
+            # Handle dict field shapes like {"value": ...}
+            if isinstance(field, dict):
+                inner = field.get('value', None)
+                if inner is None:
+                    # Some responses might use alternate key
+                    inner = field.get('name', None)
+                # Enum-like nested dict {"value": {"value": "..."}}
+                if isinstance(inner, dict) and 'value' in inner:
+                    return inner.get('value')
+                return inner
             return None
         
         metadata_fields = {
             'metadata_extracted': True,
-            'title': extract_field_value(getattr(metadata, 'title', None)),
-            'doc_type': extract_field_value(getattr(metadata, 'document_type', None)),
-            'health_topic': extract_field_value(getattr(metadata, 'health_focus', None)),
-            'creator': extract_field_value(getattr(metadata, 'issuing_authority', None)),
-            'year': extract_field_value(getattr(metadata, 'year', None)),
-            'country': extract_field_value(getattr(metadata, 'country', None)),
-            'language': extract_field_value(getattr(metadata, 'language', None)),
-            'governance_level': extract_field_value(getattr(metadata, 'governance_level', None)),
-            'overall_confidence': getattr(metadata, 'overall_confidence', None),
-            'metadata_completeness': getattr(metadata, 'metadata_completeness', None)
+            'title': extract_field_value(get_meta_field(metadata, 'title')),
+            # Use DocumentMetadata field names
+            'doc_type': extract_field_value(get_meta_field(metadata, 'doc_type'), 'doc_type'),
+            'health_topic': extract_field_value(get_meta_field(metadata, 'health_topic'), 'health_topic'),
+            'creator': extract_field_value(get_meta_field(metadata, 'creator'), 'creator'),
+            'year': extract_field_value(get_meta_field(metadata, 'year')),
+            'country': extract_field_value(get_meta_field(metadata, 'country')),
+            'language': extract_field_value(get_meta_field(metadata, 'language')),
+            # Use DocumentMetadata field name
+            'governance_level': extract_field_value(get_meta_field(metadata, 'level')),
+            'overall_confidence': getattr(metadata, 'overall_confidence', None) if not isinstance(metadata, dict) else metadata.get('overall_confidence'),
+            'metadata_completeness': getattr(metadata, 'metadata_completeness', None) if not isinstance(metadata, dict) else metadata.get('metadata_completeness')
         }
     else:
         metadata_fields = {
@@ -1177,26 +1211,61 @@ def export_results_to_csv(results: List[Dict[str, Any]], output_path: str) -> No
         # Extract metadata if available
         metadata = result.get('metadata')
         if metadata:
-            # Helper function to safely extract field values
-            def extract_field_value(field):
-                if field and hasattr(field, 'value'):
-                    if hasattr(field.value, 'value'):  # Enum field
-                        return field.value.value
-                    return field.value
+            # Helper function to safely extract field values and handle alt names
+            def get_meta_field(meta_obj, *names):
+                for name in names:
+                    if hasattr(meta_obj, name):
+                        v = getattr(meta_obj, name)
+                        if v is not None:
+                            return v
+                    if isinstance(meta_obj, dict) and name in meta_obj and meta_obj[name] is not None:
+                        return meta_obj[name]
                 return None
+
+            def extract_field_value(field, field_name: str = ""):
+                if field_name in ['doc_type', 'health_topic', 'creator']:
+                    try:
+                        hv = hasattr(field, 'value') if field is not None else False
+                        print(f"DEBUG {field_name}: field_type={type(field)}, has_value_attr={hv}")
+                    except Exception:
+                        pass
+                if field is not None and hasattr(field, 'value'):
+                    inner = getattr(field, 'value')
+                    if hasattr(inner, 'value'):
+                        return inner.value
+                    return inner
+                if isinstance(field, dict):
+                    inner = field.get('value', None)
+                    if inner is None:
+                        inner = field.get('name', None)
+                    if isinstance(inner, dict) and 'value' in inner:
+                        return inner.get('value')
+                    return inner
+                return None
+            
+            # DEBUG: Check what fields actually exist on metadata object
+            print(f"\nDEBUG: metadata object type: {type(metadata)}")
+            try:
+                print(f"DEBUG: metadata fields: {[attr for attr in dir(metadata) if not attr.startswith('_')]}")
+                print(f"DEBUG: hasattr doc_type: {hasattr(metadata, 'doc_type')}")
+                print(f"DEBUG: hasattr health_topic: {hasattr(metadata, 'health_topic')}")
+                print(f"DEBUG: hasattr creator: {hasattr(metadata, 'creator')}")
+                print(f"DEBUG: hasattr level: {hasattr(metadata, 'level')}")
+            except Exception:
+                pass
             
             metadata_row = {
                 'metadata_extracted': True,
-                'title': extract_field_value(metadata.title),
-                'doc_type': extract_field_value(metadata.doc_type),
-                'health_topic': extract_field_value(metadata.health_topic),
-                'creator': extract_field_value(metadata.creator),
-                'year': extract_field_value(metadata.year),
-                'country': extract_field_value(metadata.country),
-                'language': extract_field_value(metadata.language),
-                'governance_level': extract_field_value(metadata.governance_level),
-                'overall_confidence': metadata.overall_confidence,
-                'metadata_completeness': metadata.metadata_completeness
+                'title': extract_field_value(get_meta_field(metadata, 'title')),
+                'doc_type': extract_field_value(get_meta_field(metadata, 'doc_type', 'document_type'), 'doc_type'),
+                'health_topic': extract_field_value(get_meta_field(metadata, 'health_topic'), 'health_topic'),
+                'creator': extract_field_value(get_meta_field(metadata, 'creator'), 'creator'),
+                'year': extract_field_value(get_meta_field(metadata, 'year')),
+                'country': extract_field_value(get_meta_field(metadata, 'country')),
+                'language': extract_field_value(get_meta_field(metadata, 'language')),
+                'governance_level': extract_field_value(get_meta_field(metadata, 'level', 'governance_level')),
+                'overall_confidence': getattr(metadata, 'overall_confidence', None) if not isinstance(metadata, dict) else metadata.get('overall_confidence'),
+                'metadata_completeness': getattr(metadata, 'metadata_completeness', None) if not isinstance(metadata, dict) else metadata.get('metadata_completeness')
             }
         else:
             # No metadata extracted
@@ -1490,7 +1559,7 @@ def main():
             display_field("Year", metadata.year)
             display_field("Country", metadata.country)
             display_field("Language", metadata.language)
-            display_field("Governance Level", metadata.governance_level)
+            display_field("Governance Level", metadata.level)
             
             print("-" * 60)
             
