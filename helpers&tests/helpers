@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""
+Deduplicate files in docs_all_complete/ by comparing SHA256 hashes.
+Identifies truly identical files (same content) even with different names.
+"""
+
+import hashlib
+import os
+import json
+from pathlib import Path
+from collections import defaultdict
+import shutil
+from datetime import datetime
+
+DOCS_FOLDER = 'docs_all_complete'
+DEDUP_FOLDER = 'docs_deduplicated'
+HASH_CACHE_FILE = 'file_hashes.json'
+DUPLICATE_REPORT_FILE = 'duplicate_files_report.json'
+
+def calculate_file_hash(filepath):
+    """Calculate SHA256 hash of a file."""
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            # Read file in chunks to handle large files efficiently
+            for chunk in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
+    except Exception as e:
+        print(f"Error hashing {filepath}: {e}")
+        return None
+
+def load_hash_cache():
+    """Load previously calculated hashes to avoid recalculating."""
+    if os.path.exists(HASH_CACHE_FILE):
+        with open(HASH_CACHE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_hash_cache(cache):
+    """Save hash cache to file."""
+    with open(HASH_CACHE_FILE, 'w') as f:
+        json.dump(cache, f, indent=2)
+
+def get_file_info(filepath):
+    """Get file size and modification time for cache validation."""
+    stat = os.stat(filepath)
+    return {
+        'size': stat.st_size,
+        'mtime': stat.st_mtime
+    }
+
+def hash_all_files(folder):
+    """Calculate hashes for all files, using cache when possible."""
+    print(f"📊 Calculating file hashes in {folder}...")
+    
+    # Load existing cache
+    cache = load_hash_cache()
+    hash_to_files = defaultdict(list)
+    files_processed = 0
+    cache_hits = 0
+    
+    folder_path = Path(folder)
+    all_files = list(folder_path.glob('*'))
+    total_files = len([f for f in all_files if f.is_file()])
+    
+    print(f"📁 Found {total_files} files to process")
+    
+    for file_path in all_files:
+        if not file_path.is_file():
+            continue
+            
+        files_processed += 1
+        filepath_str = str(file_path)
+        filename = file_path.name
+        
+        # Check cache validity
+        current_info = get_file_info(filepath_str)
+        cache_key = filepath_str
+        
+        file_hash = None
+        if cache_key in cache:
+            cached_entry = cache[cache_key]
+            # Check if file hasn't changed (same size and modification time)
+            if (cached_entry.get('size') == current_info['size'] and 
+                cached_entry.get('mtime') == current_info['mtime']):
+                file_hash = cached_entry['hash']
+                cache_hits += 1
+        
+        # Calculate hash if not in cache or file changed
+        if file_hash is None:
+            file_hash = calculate_file_hash(filepath_str)
+            if file_hash:
+                # Update cache
+                cache[cache_key] = {
+                    'hash': file_hash,
+                    'size': current_info['size'],
+                    'mtime': current_info['mtime'],
+                    'filename': filename
+                }
+        
+        if file_hash:
+            hash_to_files[file_hash].append({
+                'path': filepath_str,
+                'name': filename,
+                'size': current_info['size']
+            })
+        
+        # Progress update
+        if files_processed % 100 == 0:
+            print(f"  Progress: {files_processed}/{total_files} ({files_processed*100/total_files:.1f}%)")
+    
+    # Save updated cache
+    save_hash_cache(cache)
+    
+    print(f"✅ Hash calculation complete!")
+    print(f"  📊 Files processed: {files_processed}")
+    print(f"  ⚡ Cache hits: {cache_hits} ({cache_hits*100/files_processed:.1f}%)")
+    print(f"  🔍 Unique hashes: {len(hash_to_files)}")
+    
+    return hash_to_files
+
+def find_duplicates(hash_to_files):
+    """Find duplicate files (same hash, multiple files)."""
+    duplicates = {}
+    unique_files = {}
+    
+    for file_hash, file_list in hash_to_files.items():
+        if len(file_list) > 1:
+            # Multiple files with same hash = duplicates
+            duplicates[file_hash] = file_list
+        else:
+            # Single file with this hash = unique
+            unique_files[file_hash] = file_list[0]
+    
+    return duplicates, unique_files
+
+def analyze_duplicates(duplicates):
+    """Analyze duplicate files and create detailed report."""
+    print(f"\n🔍 DUPLICATE ANALYSIS")
+    print("=" * 50)
+    
+    duplicate_report = {
+        'analysis_date': datetime.now().isoformat(),
+        'summary': {
+            'total_duplicate_groups': len(duplicates),
+            'total_duplicate_files': sum(len(files) for files in duplicates.values()),
+            'total_redundant_files': sum(len(files) - 1 for files in duplicates.values()),
+            'space_saved_bytes': 0
+        },
+        'duplicate_groups': []
+    }
+    
+    total_duplicate_files = 0
+    total_redundant_files = 0
+    space_saved = 0
+    
+    for file_hash, file_list in sorted(duplicates.items(), key=lambda x: len(x[1]), reverse=True):
+        group_size = len(file_list)
+        file_size = file_list[0]['size']
+        redundant_copies = group_size - 1
+        group_space_saved = redundant_copies * file_size
+        
+        total_duplicate_files += group_size
+        total_redundant_files += redundant_copies
+        space_saved += group_space_saved
+        
+        print(f"\n📄 Duplicate Group ({group_size} copies, {file_size:,} bytes each)")
+        print(f"   Hash: {file_hash[:16]}...")
+        print(f"   Space wasted: {group_space_saved:,} bytes ({group_space_saved/1024/1024:.1f} MB)")
+        
+        group_info = {
+            'hash': file_hash,
+            'file_count': group_size,
+            'file_size_bytes': file_size,
+            'redundant_copies': redundant_copies,
+            'space_wasted_bytes': group_space_saved,
+            'files': []
+        }
+        
+        for i, file_info in enumerate(file_list):
+            filename = file_info['name']
+            is_original = i == 0
+            print(f"   {'➤' if is_original else ' '} {filename} {'(KEEP)' if is_original else '(DUPLICATE)'}")
+            
+            group_info['files'].append({
+                'filename': filename,
+                'path': file_info['path'],
+                'keep': is_original
+            })
+        
+        duplicate_report['duplicate_groups'].append(group_info)
+    
+    duplicate_report['summary']['total_duplicate_files'] = total_duplicate_files
+    duplicate_report['summary']['total_redundant_files'] = total_redundant_files  
+    duplicate_report['summary']['space_saved_bytes'] = space_saved
+    
+    print(f"\n📊 SUMMARY:")
+    print(f"  🔄 Duplicate groups: {len(duplicates)}")
+    print(f"  📄 Total duplicate files: {total_duplicate_files}")
+    print(f"  🗑️  Redundant files: {total_redundant_files}")
+    print(f"  💾 Space wasted: {space_saved:,} bytes ({space_saved/1024/1024:.1f} MB)")
+    
+    return duplicate_report
+
+def create_deduplicated_collection(hash_to_files, duplicates, unique_files):
+    """Create deduplicated collection by copying one file per unique hash."""
+    print(f"\n📁 Creating deduplicated collection in {DEDUP_FOLDER}...")
+    
+    # Create output folder
+    os.makedirs(DEDUP_FOLDER, exist_ok=True)
+    
+    files_copied = 0
+    total_files = len(unique_files) + len(duplicates)
+    
+    # Copy unique files (no duplicates)
+    for file_hash, file_info in unique_files.items():
+        src_path = file_info['path']
+        dst_path = os.path.join(DEDUP_FOLDER, file_info['name'])
+        shutil.copy2(src_path, dst_path)
+        files_copied += 1
+    
+    print(f"✅ Copied {len(unique_files)} unique files")
+    
+    # Copy one representative from each duplicate group
+    for file_hash, file_list in duplicates.items():
+        # Use the first file as the representative
+        representative = file_list[0]
+        src_path = representative['path']
+        dst_path = os.path.join(DEDUP_FOLDER, representative['name'])
+        shutil.copy2(src_path, dst_path)
+        files_copied += 1
+    
+    print(f"✅ Copied {len(duplicates)} representatives from duplicate groups")
+    print(f"📊 Total files in deduplicated collection: {files_copied}")
+    
+    return files_copied
+
+def main():
+    """Main deduplication function."""
+    print(f"\n{'='*60}")
+    print("FILE DEDUPLICATION BY HASH")
+    print(f"{'='*60}\n")
+    
+    # Check input folder
+    if not os.path.exists(DOCS_FOLDER):
+        print(f"❌ Input folder {DOCS_FOLDER} not found!")
+        return
+    
+    # Hash all files
+    hash_to_files = hash_all_files(DOCS_FOLDER)
+    
+    # Find duplicates
+    duplicates, unique_files = find_duplicates(hash_to_files)
+    
+    if not duplicates:
+        print(f"\n🎉 NO DUPLICATES FOUND!")
+        print(f"All {len(unique_files)} files are unique by content")
+        return
+    
+    # Analyze duplicates  
+    duplicate_report = analyze_duplicates(duplicates)
+    
+    # Save report
+    with open(DUPLICATE_REPORT_FILE, 'w') as f:
+        json.dump(duplicate_report, f, indent=2)
+    print(f"\n💾 Duplicate report saved to: {DUPLICATE_REPORT_FILE}")
+    
+    # Ask user if they want to create deduplicated collection
+    create_dedup = input(f"\nCreate deduplicated collection in {DEDUP_FOLDER}? (y/n): ")
+    
+    if create_dedup.lower() == 'y':
+        final_count = create_deduplicated_collection(hash_to_files, duplicates, unique_files)
+        
+        original_count = len(hash_to_files)  # This counts all files
+        saved_files = sum(len(files) - 1 for files in duplicates.values())
+        
+        print(f"\n🎉 DEDUPLICATION COMPLETE!")
+        print(f"  📄 Original files: {original_count}")
+        print(f"  📁 Deduplicated files: {final_count}")
+        print(f"  🗑️  Files removed: {saved_files}")
+        print(f"  📊 Space efficiency: {final_count*100/original_count:.1f}%")
+        print(f"  💾 Saved: {duplicate_report['summary']['space_saved_bytes']:,} bytes")
+
+if __name__ == "__main__":
+    main()

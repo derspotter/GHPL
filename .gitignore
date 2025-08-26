@@ -13,6 +13,8 @@
 # Ignore the docs directory with thousands of PDFs
 docs/
 docs_correct/
+docs_final/
+docs_all_complete/
 
 # Keep documents-info.xlsx (needed for ground truth) but ignore other Excel files
 *.xlsx
