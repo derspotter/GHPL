@@ -359,9 +359,10 @@ python meta_ghpl_gpt5.py --docs-dir docs_correct --workers 80
 
 See `CLAUDE.md` for detailed development instructions and `plan.md` for the enhancement roadmap.
 
-## License
+## Notice
 
-[Add appropriate license]
+Copyright (c) 2025 The Virchow Foundation and Contributors.
+All rights reserved.
 
 ## Contributing
 
